@@ -4,17 +4,16 @@ import pandas as pd
 from datetime import date
 from typing import Any, Dict, Optional, Tuple
 
+import os
 
-
-
-def get_connection() -> psycopg2.extensions.connection:
-
+def get_connection():
     return psycopg2.connect(
-        host="localhost",
-        database="rule_conflict_db",
-        user="postgres",
-        password="abhyu.23",  
-        port=5432,
+        host=os.getenv("DB_HOST"),
+        database=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        port=os.getenv("DB_PORT", "5432"),
+        sslmode="require"
     )
 
 
