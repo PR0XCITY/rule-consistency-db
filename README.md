@@ -105,17 +105,3 @@ Create a PostgreSQL database named:
 
 ```sql
 CREATE DATABASE rule_conflict_db;
-
-### 3. Initialize Schema
-After creating the database, run the provided SQL scripts to create the required tables and views:
-
-- `rules`
-- `rule_conditions`
-- `rule_actions`
-- `rule_conflicts_view`
-
-These scripts must be executed inside the `rule_conflict_db` database.
-
-## Author
-Abhyudai Srivastava
-
