@@ -29,11 +29,11 @@ Python is used only for data input and visualization.
 ---
 
 ## Technologies Used
-- PostgreSQL (Relational Database)
-- SQL (Schema design and conflict detection logic)
+- PostgreSQL
+- SQL
 - Python
-- Streamlit (UI layer)
-- psycopg2 (PostgreSQL connector)
+- Streamlit
+- psycopg2
 
 ---
 
@@ -51,24 +51,25 @@ Python is used only for data input and visualization.
 
 ### View
 - `rule_conflicts_view`  
-  A SQL view that detects conflicting rules based on overlapping time periods and contradictory actions.
+  Detects conflicting rules based on overlapping time periods and contradictory actions.
 
 ---
 
 ## Current Implementation Scope (Intentional)
-Implemented:
-- Normalized schema for rule storage
-- SQL-based conflict detection for direct action-level conflicts
-- Clean separation between database logic and application layer
-- UI for inserting rules, conditions, actions, and viewing conflicts
 
-Not implemented (by design):
-- Condition overlap evaluation
-- Multi-condition logical reasoning
+### Implemented
+- Normalized relational schema for rule storage
+- SQL-based detection of direct action-level conflicts
+- Clear separation between database logic and application layer
+- UI for inserting rules, conditions, actions, and viewing detected conflicts
+
+### Not Implemented (By Design)
+- Logical evaluation of overlapping conditions
+- Multi-condition rule reasoning
 - Priority-based conflict resolution
 - Automatic conflict resolution
 
-These are discussed as future scope.
+These are intentionally left as future scope to emphasize DBMS limitations.
 
 ---
 
@@ -78,7 +79,15 @@ Most DBMS projects focus on managing entities. This project focuses on **managin
 It demonstrates:
 - How SQL can be stretched to reason about rule consistency
 - Where relational databases fall short for logical inference
-- Why some problems require tradeoffs rather than perfect solutions
+- Why some problems require tradeoffs instead of complete automation
+
+---
+
+## Project Status
+This project represents a **partial but deliberate implementation**.  
+The focus is on problem modeling and conflict detection rather than feature completeness.
+
+This approach reflects real-world database design, where understanding limitations is as important as implementation.
 
 ---
 
@@ -86,8 +95,27 @@ It demonstrates:
 
 ### 1. Prerequisites
 - PostgreSQL installed and running
-- Python 3.9+
+- Python 3.9 or higher
 - `pip` available
+
+---
 
 ### 2. Create Database
 Create a PostgreSQL database named:
+
+```sql
+CREATE DATABASE rule_conflict_db;
+
+### 3. Initialize Schema
+After creating the database, run the provided SQL scripts to create the required tables and views:
+
+- `rules`
+- `rule_conditions`
+- `rule_actions`
+- `rule_conflicts_view`
+
+These scripts must be executed inside the `rule_conflict_db` database.
+
+## Author
+Abhyudai Srivastava
+
