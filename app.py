@@ -86,27 +86,24 @@ def fetch_rules() -> pd.DataFrame:
 
 @st.cache_data(ttl=60)
 def fetch_conflicts() -> pd.DataFrame:
-    """Return conflicts from the SQL view (no conflict logic in Python)."""
+
     query = "SELECT * FROM rule_conflicts_view"
     return fetch_dataframe(query)
 
 
 def check_db_health() -> Tuple[bool, Optional[str]]:
-    """Perform a lightweight DB health check."""
+
     try:
-        # Simple query; relies entirely on DB/SQL
+
         _ = fetch_dataframe("SELECT 1 AS ok")
         return True, None
     except Exception as exc:
         return False, str(exc)
 
 
-# -----------------------------------------------------------------------------
-# UI helpers
-# -----------------------------------------------------------------------------
 
 def show_sidebar() -> str:
-    """Render the sidebar and return the selected navigation item."""
+
     st.sidebar.title("Rule Conflict DB")
     st.sidebar.caption("Manage rules, conditions, actions, and view conflicts.")
 
@@ -284,20 +281,15 @@ def show_conflicts_page() -> None:
         st.info("No conflicts found in `rule_conflicts_view`.")
         return
 
-    # Optional: provide a simple summary above the table
     st.markdown(f"**Total Conflicts:** {len(df)}")
     st.dataframe(df, use_container_width=True)
-
-
-# -----------------------------------------------------------------------------
-# Main app
-# -----------------------------------------------------------------------------
 
 def main() -> None:
     st.set_page_config(
         page_title="Rule Conflict Database",
         page_icon="⚖️",
         layout="wide",
+        initial_sidebar_state="collapsed"
     )
 
     st.title("Rule Conflict Database")
