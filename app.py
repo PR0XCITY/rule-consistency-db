@@ -5,6 +5,8 @@ from datetime import date
 from typing import Any, Dict, Optional, Tuple
 import os
 
+import streamlit as st
+
 st.set_page_config(
     page_title="Rule Conflict Database",
     page_icon="⚖️",
@@ -314,12 +316,6 @@ def show_conflicts_page() -> None:
     st.dataframe(df, use_container_width=True)
 
 def main() -> None:
-    st.set_page_config(
-        page_title="Rule Conflict Database",
-        page_icon="⚖️",
-        layout="wide",
-        initial_sidebar_state="collapsed"
-    )
 
     st.title("Rule Conflict Database")
 
