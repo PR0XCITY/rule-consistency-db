@@ -3,20 +3,37 @@ import psycopg2
 import pandas as pd
 from datetime import date
 from typing import Any, Dict, Optional, Tuple
-
 import os
+
+st.set_page_config(
+    page_title="Rule Conflict Database",
+    page_icon="⚖️",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
 st.markdown(
     """
     <style>
-    @media (max-width: 768px) {
-        [data-testid="collapsedControl"] {
-            display: none;
-        }
+    /* Kill Streamlit's mobile sidebar toggle text/icons */
+    button[kind="header"] {
+        display: none !important;
+    }
+
+    /* Extra safety for newer Streamlit builds */
+    [data-testid="collapsedControl"] {
+        display: none !important;
+    }
+
+    /* Hide stray material icon text */
+    span[class*="material-icons"] {
+        display: none !important;
     }
     </style>
     """,
     unsafe_allow_html=True
 )
+
 
 def get_connection():
     return psycopg2.connect(
