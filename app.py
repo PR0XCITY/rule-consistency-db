@@ -122,6 +122,48 @@ def fetch_conflicts() -> pd.DataFrame:
     return fetch_dataframe(query)
 
 
+@st.cache_data(ttl=60)
+def fetch_all_rules() -> pd.DataFrame:
+    """Return all rules for the overview tab."""
+    query = "SELECT * FROM rules ORDER BY rule_id"
+    return fetch_dataframe(query)
+
+
+@st.cache_data(ttl=60)
+def fetch_all_conditions() -> pd.DataFrame:
+    """Return all rule conditions joined with rule names."""
+    query = """
+        SELECT 
+            rc.condition_id,
+            rc.rule_id,
+            r.rule_name,
+            rc.attribute_name,
+            rc.operator,
+            rc.value
+        FROM rule_conditions rc
+        JOIN rules r ON rc.rule_id = r.rule_id
+        ORDER BY rc.rule_id, rc.condition_id
+    """
+    return fetch_dataframe(query)
+
+
+@st.cache_data(ttl=60)
+def fetch_all_actions() -> pd.DataFrame:
+    """Return all rule actions joined with rule names."""
+    query = """
+        SELECT 
+            ra.action_id,
+            ra.rule_id,
+            r.rule_name,
+            ra.action_type,
+            ra.target_entity
+        FROM rule_actions ra
+        JOIN rules r ON ra.rule_id = r.rule_id
+        ORDER BY ra.rule_id, ra.action_id
+    """
+    return fetch_dataframe(query)
+
+
 def check_db_health() -> Tuple[bool, Optional[str]]:
 
     try:
@@ -133,7 +175,7 @@ def check_db_health() -> Tuple[bool, Optional[str]]:
 
 
 
-def show_sidebar() -> str:
+def show_sidebar() -> None:
 
     st.sidebar.title("Rule Conflict DB")
     st.sidebar.caption("Manage rules, conditions, actions, and view conflicts.")
@@ -148,22 +190,7 @@ def show_sidebar() -> str:
             st.code(error_msg or "Unknown error")
 
     st.sidebar.markdown("---")
-
-    page = st.sidebar.radio(
-        "Navigation",
-        options=[
-            "Add Rule",
-            "Add Condition",
-            "Add Action",
-            "View Conflicts",
-        ],
-        index=0,
-    )
-
-    st.sidebar.markdown("---")
     st.sidebar.caption("All rule evaluation and conflict detection is implemented in SQL.")
-
-    return page
 
 
 def show_add_rule_page() -> None:
@@ -194,8 +221,9 @@ def show_add_rule_page() -> None:
                     add_rule(rule_name.strip(), rule_category.strip(), int(priority), active_from, active_to)
                     st.success("Rule added successfully.")
                     st.toast("Rule added.", icon="✅")
-                    # Clear rule cache so new rule appears in dropdowns
+                    # Clear rule cache so new rule appears in dropdowns and overview
                     fetch_rules.clear()
+                    fetch_all_rules.clear()
                 except Exception as exc:
                     st.error("Unable to add rule. Please check the database connection and constraints.")
                     with st.expander("Error details"):
@@ -244,6 +272,8 @@ def show_add_condition_page() -> None:
                     add_condition(rule_id, attribute_name.strip(), operator, value.strip())
                     st.success("Condition added successfully.")
                     st.toast("Condition added.", icon="✅")
+                    # Clear cache so new condition appears in overview
+                    fetch_all_conditions.clear()
                 except Exception as exc:
                     st.error("Unable to add condition. Please check the database and constraints.")
                     with st.expander("Error details"):
@@ -287,6 +317,8 @@ def show_add_action_page() -> None:
                     add_action(rule_id, action_type, target_entity.strip())
                     st.success("Action added successfully.")
                     st.toast("Action added.", icon="✅")
+                    # Clear cache so new action appears in overview
+                    fetch_all_actions.clear()
                 except Exception as exc:
                     st.error("Unable to add action. Please check the database and constraints.")
                     with st.expander("Error details"):
@@ -313,23 +345,90 @@ def show_conflicts_page() -> None:
         return
 
     st.markdown(f"**Total Conflicts:** {len(df)}")
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(
+    df,
+    use_container_width=True,
+    column_config={
+        "conflict_reason": st.column_config.TextColumn(
+            "Conflict Explanation",
+            width="large",
+        )
+    }
+)
+
+
+def show_all_rules_overview_page() -> None:
+    st.subheader("Rules")
+    st.caption("All rules in the database.")
+    
+    try:
+        rules_df = fetch_all_rules()
+        if rules_df.empty:
+            st.info("No rules found in the database.")
+        else:
+            st.dataframe(rules_df, use_container_width=True)
+    except Exception as exc:
+        st.error("Unable to fetch rules from the database.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+    
+    st.subheader("Conditions")
+    st.caption("All rule conditions joined with rule names.")
+    
+    try:
+        conditions_df = fetch_all_conditions()
+        if conditions_df.empty:
+            st.info("No conditions found in the database.")
+        else:
+            st.dataframe(conditions_df, use_container_width=True)
+    except Exception as exc:
+        st.error("Unable to fetch conditions from the database.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+    
+    st.subheader("Actions")
+    st.caption("All rule actions joined with rule names.")
+    
+    try:
+        actions_df = fetch_all_actions()
+        if actions_df.empty:
+            st.info("No actions found in the database.")
+        else:
+            st.dataframe(actions_df, use_container_width=True)
+    except Exception as exc:
+        st.error("Unable to fetch actions from the database.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+
 
 def main() -> None:
 
     st.title("Rule Conflict Database")
 
-    page = show_sidebar()
+    show_sidebar()
 
-    with st.container():
-        if page == "Add Rule":
-            show_add_rule_page()
-        elif page == "Add Condition":
-            show_add_condition_page()
-        elif page == "Add Action":
-            show_add_action_page()
-        elif page == "View Conflicts":
-            show_conflicts_page()
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "All Rules Overview",
+        "Add Rule",
+        "Add Condition",
+        "Add Action",
+        "View Conflicts"
+    ])
+
+    with tab1:
+        show_all_rules_overview_page()
+
+    with tab2:
+        show_add_rule_page()
+
+    with tab3:
+        show_add_condition_page()
+
+    with tab4:
+        show_add_action_page()
+
+    with tab5:
+        show_conflicts_page()
 
 
 if __name__ == "__main__":
