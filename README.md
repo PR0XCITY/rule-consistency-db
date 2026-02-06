@@ -91,17 +91,5 @@ This approach reflects real-world database design, where understanding limitatio
 
 ---
 
-## How to Run the Project
 
-### 1. Prerequisites
-- PostgreSQL installed and running
-- Python 3.9 or higher
-- `pip` available
 
----
-
-### 2. Create Database
-Create a PostgreSQL database named:
-
-```sql
-CREATE DATABASE rule_conflict_db;
