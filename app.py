@@ -5,6 +5,18 @@ from datetime import date
 from typing import Any, Dict, Optional, Tuple
 
 import os
+st.markdown(
+    """
+    <style>
+    @media (max-width: 768px) {
+        [data-testid="collapsedControl"] {
+            display: none;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 def get_connection():
     return psycopg2.connect(
