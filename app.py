@@ -127,11 +127,12 @@ def get_rule_conditions_summary(rule_id: int) -> str:
         return "No conditions defined"
 
 
-def explain_conflict_ai(conflict: dict) -> str:
+def explain_conflict_ai(conflict: dict, debug_info: Optional[Dict[str, Any]] = None) -> str:
     """
-    Call Hugging Face router inference API for a conflict-specific explanation using
-    rule condition data. Does not modify DB, resolve conflicts, run SQL, or change priorities.
-    Returns error-style string (e.g. leading '*') on failure so caller can use fallback.
+    Call Hugging Face router inference API for a conflict-specific explanation.
+    Does not modify DB, resolve conflicts, run SQL, or change priorities.
+    Returns the extracted model text on success. Raises on HTTP failure or unexpected JSON.
+    If debug_info dict is provided, raw_response and status_code are written to it.
     """
     rule_1_name = _get_conflict_field(conflict, "rule_1_name", "rule_name_1", default="Rule 1")
     rule_2_name = _get_conflict_field(conflict, "rule_2_name", "rule_name_2", default="Rule 2")
@@ -160,67 +161,76 @@ def explain_conflict_ai(conflict: dict) -> str:
     )
 
     if not HUGGINGFACE_API_KEY:
-        return "*AI explanation unavailable: `HUGGINGFACE_API_KEY` is not set.*"
+        raise ValueError("HUGGINGFACE_API_KEY is not set. Set it in your environment to use AI explanations.")
+
+    headers = {
+        "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "inputs": prompt,
+        "parameters": {"max_new_tokens": 400, "temperature": 0.4},
+    }
+    resp = requests.post(
+        HUGGINGFACE_INFERENCE_URL,
+        headers=headers,
+        json=payload,
+        timeout=HUGGINGFACE_TIMEOUT,
+    )
+    raw_text = resp.text
+    if debug_info is not None:
+        debug_info["raw_response"] = raw_text
+        debug_info["status_code"] = resp.status_code
+
+    if resp.status_code != 200:
+        try:
+            err_body = resp.json()
+            err_msg = err_body.get("error", raw_text[:500])
+        except Exception:
+            err_msg = raw_text[:500] if raw_text else str(resp.status_code)
+        raise RuntimeError(f"HTTP {resp.status_code}: {err_msg}")
 
     try:
-        headers = {
-            "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "inputs": prompt,
-            "parameters": {"max_new_tokens": 400, "temperature": 0.4},
-        }
-        resp = requests.post(
-            HUGGINGFACE_INFERENCE_URL,
-            headers=headers,
-            json=payload,
-            timeout=HUGGINGFACE_TIMEOUT,
-        )
-        if resp.status_code != 200:
-            try:
-                err = resp.json().get("error", resp.text[:200])
-            except Exception:
-                err = resp.text[:200] if resp.text else str(resp.status_code)
-            return f"*API returned {resp.status_code}: {err}*"
         data = resp.json()
-        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "generated_text" in data[0]:
-            return data[0]["generated_text"].strip()
-        if isinstance(data, dict):
-            if "error" in data:
-                return f"*API error: {data['error']}*"
-            if "generated_text" in data:
-                return str(data["generated_text"]).strip()
-        return "*Could not parse AI response.*"
-    except requests.exceptions.Timeout:
-        return "*Request timed out. Try again or use the fallback explanation.*"
-    except requests.exceptions.RequestException as e:
-        return f"*Request failed: {str(e)[:200]}*"
     except Exception as e:
-        return f"*Unexpected error: {str(e)[:200]}*"
+        raise ValueError(f"Invalid JSON from API: {e}. Raw (first 500 chars): {raw_text[:500]}")
+
+    generated = None
+    if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+        generated = data[0].get("generated_text")
+    if generated is None and isinstance(data, dict):
+        if "error" in data:
+            raise RuntimeError(f"API error in response: {data['error']}")
+        generated = data.get("generated_text")
+    if not generated:
+        raise ValueError(
+            f"Could not extract generated_text from response. "
+            f"Response type: {type(data).__name__}. Keys: {list(data.keys()) if isinstance(data, dict) else 'list'}."
+        )
+    return str(generated).strip()
 
 
 def explain_conflict_fallback(conflict: dict) -> str:
     """
-    Deterministic, human-readable explanation and resolution ideas when AI is
-    unavailable or rate-limited. Does not modify data or resolve conflicts.
+    Deterministic explanation and resolution ideas when AI is unavailable.
+    Does not modify data or resolve conflicts. No generic action-polarity templates.
     """
     rule_1_name = _get_conflict_field(conflict, "rule_1_name", "rule_name_1", default="Rule 1")
     rule_2_name = _get_conflict_field(conflict, "rule_2_name", "rule_name_2", default="Rule 2")
-    action_1 = _get_conflict_field(conflict, "action_1", "action_type_1", default="action 1")
-    action_2 = _get_conflict_field(conflict, "action_2", "action_type_2", default="action 2")
+    action_1 = _get_conflict_field(conflict, "action_1", "action_type_1", default="—")
+    action_2 = _get_conflict_field(conflict, "action_2", "action_type_2", default="—")
     target_entity = _get_conflict_field(conflict, "target_entity", "target", default="target")
     conflict_reason = _get_conflict_field(conflict, "conflict_reason", "reason", default="Conflict detected.")
 
     return (
         f"**Explanation**\n\n"
-        f"Rules **{rule_1_name}** and **{rule_2_name}** conflict on the same target (**{target_entity}**). "
-        f"One specifies **{action_1}** and the other **{action_2}**, so the system cannot apply both. "
-        f"The database reports: {conflict_reason}\n\n"
+        f"Rules **{rule_1_name}** and **{rule_2_name}** conflict on target **{target_entity}**. "
+        f"Rule 1 action: {action_1}. Rule 2 action: {action_2}. "
+        f"Database note: {conflict_reason}\n\n"
         "**Resolution ideas**\n\n"
         "1. **Adjust priorities** — Give one rule higher priority so it is applied first.\n"
-        "2. **Narrow conditions** — Restrict one or both rules (e.g. by attribute or value) so they do not apply to the same cases.\n"
-        "3. **Merge or remove** — If both intend the same outcome, consider merging; otherwise remove or disable one rule."
+        "2. **Narrow conditions** — Restrict one or both rules so they do not apply to the same cases.\n"
+        "3. **Merge or remove** — Merge rules if the intent is the same; otherwise remove or disable one."
     )
 
 
@@ -767,10 +777,12 @@ def show_conflicts_page(user_id: int) -> None:
     st.caption(
         "Optional: get a plain-language explanation and resolution suggestions. "
         "The AI does not modify data, resolve conflicts, run SQL, or change priorities. "
-        "If the AI request fails or is rate-limited, a deterministic fallback explanation is shown."
+        "If the AI request fails, a fallback explanation is shown and the error is displayed in the debug expander."
     )
     if not HUGGINGFACE_API_KEY:
-        st.warning("Set `HUGGINGFACE_API_KEY` in your environment to enable AI explanations. A fallback explanation is always available.")
+        st.warning("Set `HUGGINGFACE_API_KEY` in your environment to enable AI explanations. A fallback explanation is used when the button is clicked.")
+
+    debug_mode = st.checkbox("Show debug info for AI", value=st.session_state.get("ai_debug_mode", False), key="ai_debug_mode")
 
     for idx, row in df.iterrows():
         row_dict = row.to_dict()
@@ -779,8 +791,24 @@ def show_conflicts_page(user_id: int) -> None:
         with st.expander(f"{rule_1_name} vs {rule_2_name}"):
             if st.session_state.get("ai_explain_results", {}).get(idx):
                 st.markdown(st.session_state["ai_explain_results"][idx])
+            if debug_mode and st.session_state.get("ai_explain_debug", {}).get(idx):
+                dbg = st.session_state["ai_explain_debug"][idx]
+                if dbg.get("rule_1_conditions") is not None or dbg.get("rule_2_conditions") is not None:
+                    with st.expander("Debug: condition summaries", expanded=False):
+                        st.text(f"rule_1_conditions: {dbg.get('rule_1_conditions', '')!r}")
+                        st.text(f"rule_2_conditions: {dbg.get('rule_2_conditions', '')!r}")
+                        c1 = dbg.get("rule_1_conditions", "")
+                        c2 = dbg.get("rule_2_conditions", "")
+                        st.caption(f"Non-empty: rule_1={bool(c1 and c1 != 'No conditions defined')}, rule_2={bool(c2 and c2 != 'No conditions defined')}")
+                if dbg.get("message"):
+                    with st.expander("AI Error (Debug)", expanded=True):
+                        st.code(dbg.get("message", ""), language="text")
+                        if dbg.get("raw_response") is not None:
+                            st.caption("Raw Hugging Face response:")
+                            st.code(dbg["raw_response"], language="json")
             if st.button("Explain with AI", key=f"ai_explain_{idx}"):
                 st.session_state.setdefault("ai_explain_results", {})[idx] = ""
+                st.session_state.setdefault("ai_explain_debug", {})[idx] = {}
                 with st.spinner("Getting AI explanation..."):
                     enriched = dict(row_dict)
                     rid1 = row_dict.get("rule_1_id") or row_dict.get("rule_id_1")
@@ -797,9 +825,31 @@ def show_conflicts_page(user_id: int) -> None:
                     except (TypeError, ValueError):
                         enriched["rule_1_conditions"] = "No conditions defined"
                         enriched["rule_2_conditions"] = "No conditions defined"
-                    result = explain_conflict_ai(enriched)
-                    if result.strip().startswith("*") or "unavailable" in result:
+
+                    if debug_mode:
+                        st.session_state["ai_explain_debug"][idx]["rule_1_conditions"] = enriched.get("rule_1_conditions", "")
+                        st.session_state["ai_explain_debug"][idx]["rule_2_conditions"] = enriched.get("rule_2_conditions", "")
+
+                    debug_info: Dict[str, Any] = {} if debug_mode else {}
+                    try:
+                        result = explain_conflict_ai(enriched, debug_info=debug_info if debug_mode else None)
+                        result = "[AI GENERATED]\n\n" + result
+                        if debug_mode:
+                            st.session_state["ai_explain_debug"][idx] = {
+                                "rule_1_conditions": enriched.get("rule_1_conditions", ""),
+                                "rule_2_conditions": enriched.get("rule_2_conditions", ""),
+                            }
+                        else:
+                            st.session_state["ai_explain_debug"][idx] = {}
+                    except Exception as e:
+                        st.session_state["ai_explain_debug"][idx] = {
+                            "message": str(e),
+                            "raw_response": debug_info.get("raw_response"),
+                            "rule_1_conditions": enriched.get("rule_1_conditions", ""),
+                            "rule_2_conditions": enriched.get("rule_2_conditions", ""),
+                        }
                         result = explain_conflict_fallback(row_dict)
+                        result = "[FALLBACK EXPLANATION]\n\n" + result
                     st.session_state["ai_explain_results"][idx] = result
                 st.rerun()
 
