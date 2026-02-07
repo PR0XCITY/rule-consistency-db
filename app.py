@@ -102,21 +102,45 @@ def _get_conflict_field(row: Dict[str, Any], *keys: str, default: str = "") -> s
 
 def explain_conflict_ai(conflict: dict) -> str:
     """
-    Call Hugging Face router inference API for a readable explanation and 2–3 resolution
-    suggestions. Does not modify DB, resolve conflicts, run SQL, or change priorities.
+    Call Hugging Face router inference API for a conflict-specific, analytical explanation.
+    Does not modify DB, resolve conflicts, run SQL, or change priorities.
     Returns error-style string (e.g. leading '*') on failure so caller can use fallback.
     """
     rule_1_name = _get_conflict_field(conflict, "rule_1_name", "rule_name_1", default="Rule 1")
     rule_2_name = _get_conflict_field(conflict, "rule_2_name", "rule_name_2", default="Rule 2")
+    rule_category_1 = _get_conflict_field(conflict, "rule_category_1", "category_1", default="(not specified)")
+    rule_category_2 = _get_conflict_field(conflict, "rule_category_2", "category_2", default="(not specified)")
     action_1 = _get_conflict_field(conflict, "action_1", "action_type_1", default="action 1")
     action_2 = _get_conflict_field(conflict, "action_2", "action_type_2", default="action 2")
     target_entity = _get_conflict_field(conflict, "target_entity", "target", default="target")
     conflict_reason = _get_conflict_field(conflict, "conflict_reason", "reason", default="Conflict detected.")
+    active_from_1 = _get_conflict_field(conflict, "active_from_1", "active_from_rule_1", default="")
+    active_to_1 = _get_conflict_field(conflict, "active_to_1", "active_to_rule_1", default="")
+    active_from_2 = _get_conflict_field(conflict, "active_from_2", "active_from_rule_2", default="")
+    active_to_2 = _get_conflict_field(conflict, "active_to_2", "active_to_rule_2", default="")
+    range_1 = f"{active_from_1} to {active_to_1}" if active_from_1 or active_to_1 else "(not specified)"
+    range_2 = f"{active_from_2} to {active_to_2}" if active_from_2 or active_to_2 else "(not specified)"
 
     prompt = (
-        f"Rule conflict: '{rule_1_name}' (action: {action_1}) vs '{rule_2_name}' (action: {action_2}) "
-        f"on target '{target_entity}'. Database reason: {conflict_reason}. "
-        "In 2-4 short sentences, explain the conflict in plain language, then give exactly 2-3 concrete resolution suggestions (e.g. adjust priority, narrow conditions). No code or SQL."
+        "You are analyzing a specific rule conflict. Do NOT give generic explanations. "
+        "Tailor every sentence to the rule names, categories, and actions below. Do not repeat boilerplate.\n\n"
+        "--- Section 1: Conflict Context ---\n"
+        f"Rule 1: {rule_1_name} (category: {rule_category_1}). Active: {range_1}.\n"
+        f"Rule 2: {rule_2_name} (category: {rule_category_2}). Active: {range_2}.\n"
+        f"Target entity: {target_entity}.\n"
+        f"Database conflict reason: {conflict_reason}\n\n"
+        "--- Section 2: Condition Analysis ---\n"
+        "Based on the context above: can the conditions of BOTH rules be true for the same entity at the same time? "
+        "Analyze why or how they overlap (refer to the specific rules by name).\n\n"
+        "--- Section 3: Action Contradiction ---\n"
+        f"Rule 1 action: {action_1}. Rule 2 action: {action_2}. "
+        "Explain how these two actions oppose each other and what real-world effect this contradiction causes for the target entity.\n\n"
+        "--- Section 4: Why This Conflict Happens ---\n"
+        "Answer in one clear sentence: Why can a single real-world entity satisfy both rules at once? "
+        "Be specific to these rules, not generic.\n\n"
+        "--- Section 5: Resolution Ideas ---\n"
+        "Give exactly 2–3 resolution strategies that are specific to THIS conflict (refer to the rule names and the overlap you identified). "
+        "No code or SQL. No generic advice."
     )
 
     if not HUGGINGFACE_API_KEY:
@@ -129,7 +153,7 @@ def explain_conflict_ai(conflict: dict) -> str:
         }
         payload = {
             "inputs": prompt,
-            "parameters": {"max_new_tokens": 250, "temperature": 0.4},
+            "parameters": {"max_new_tokens": 400, "temperature": 0.4},
         }
         resp = requests.post(
             HUGGINGFACE_INFERENCE_URL,
