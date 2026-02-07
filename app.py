@@ -148,6 +148,45 @@ def add_action(rule_id: int, action_type: str, target_entity: str) -> None:
     execute_non_query(query, params)
 
 
+def rule_status_exists(status_name: str) -> bool:
+    """Return True if status_name already exists in rule_status."""
+    df = fetch_dataframe("SELECT 1 AS ok FROM rule_status WHERE status_name = %s", (status_name.strip(),))
+    return not df.empty
+
+
+def add_rule_status(status_name: str, description: str) -> None:
+    query = """
+        INSERT INTO rule_status (status_name, description)
+        VALUES (%s, %s)
+    """
+    params = (status_name.strip(), description.strip() if description else "")
+    execute_non_query(query, params)
+
+
+def add_rule_version(rule_id: int, version_number: str, rule_snapshot: str, is_active: bool) -> None:
+    query = """
+        INSERT INTO rule_versions (rule_id, version_number, rule_snapshot, is_active)
+        VALUES (%s, %s, %s, %s)
+    """
+    params = (rule_id, version_number.strip(), rule_snapshot.strip(), is_active)
+    execute_non_query(query, params)
+
+
+def rule_priority_exists(rule_id: int) -> bool:
+    """Return True if this rule already has a row in rule_priority (one priority per rule)."""
+    df = fetch_dataframe("SELECT 1 AS ok FROM rule_priority WHERE rule_id = %s", (rule_id,))
+    return not df.empty
+
+
+def add_rule_priority(rule_id: int, priority_level: int) -> None:
+    query = """
+        INSERT INTO rule_priority (rule_id, priority_level)
+        VALUES (%s, %s)
+    """
+    params = (rule_id, priority_level)
+    execute_non_query(query, params)
+
+
 def delete_rule(rule_id: int, user_id: int) -> None:
     """Delete a rule owned by the user. Related conditions and actions are deleted via CASCADE."""
     query = "DELETE FROM rules WHERE rule_id = %s AND user_id = %s"
@@ -342,8 +381,8 @@ def show_add_rule_page(user_id: int) -> None:
 
 
 def show_add_condition_page(user_id: int) -> None:
-    st.subheader("Add Condition")
-    st.caption("Attach a condition to an existing rule.")
+    st.subheader("Add Rule Condition")
+    st.caption("Attach a condition to an existing rule (owned by you).")
 
     try:
         rules_df = fetch_rules(user_id)
@@ -393,8 +432,8 @@ def show_add_condition_page(user_id: int) -> None:
 
 
 def show_add_action_page(user_id: int) -> None:
-    st.subheader("Add Action")
-    st.caption("Attach an action to an existing rule.")
+    st.subheader("Add Rule Action")
+    st.caption("Attach an action to an existing rule (owned by you).")
 
     try:
         rules_df = fetch_rules(user_id)
@@ -434,6 +473,117 @@ def show_add_action_page(user_id: int) -> None:
                     fetch_actions_for_delete.clear()
                 except Exception as exc:
                     st.error("Unable to add action. Please check the database and constraints.")
+                    with st.expander("Error details"):
+                        st.code(str(exc))
+
+
+def show_add_rule_status_page() -> None:
+    st.subheader("Add Rule Status")
+    st.caption("Insert a new status into rule_status. Duplicate status names are not allowed.")
+
+    with st.form("add_rule_status_form", clear_on_submit=False):
+        status_name = st.text_input("Status Name", placeholder="e.g., active, draft, retired")
+        description = st.text_area("Description", placeholder="Optional description")
+        submitted = st.form_submit_button("Add Rule Status")
+
+        if submitted:
+            if not status_name or not status_name.strip():
+                st.warning("Please provide a status name.")
+            else:
+                if rule_status_exists(status_name):
+                    st.error("A status with this name already exists. Choose a different status name.")
+                else:
+                    try:
+                        add_rule_status(status_name.strip(), description.strip() if description else "")
+                        st.success("Rule status added successfully.")
+                        st.toast("Rule status added.", icon="✅")
+                    except Exception as exc:
+                        st.error("Unable to add rule status. Please check the database and constraints.")
+                        with st.expander("Error details"):
+                            st.code(str(exc))
+
+
+def show_add_rule_version_page(user_id: int) -> None:
+    st.subheader("Add Rule Version")
+    st.caption("Insert a version snapshot for an existing rule.")
+
+    try:
+        rules_df = fetch_rules(user_id)
+    except Exception as exc:
+        st.error("Unable to load rules from the database.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+        return
+
+    if rules_df.empty:
+        st.info("No rules found. Please add a rule first.")
+        return
+
+    options: Dict[str, int] = {}
+    for _, row in rules_df.iterrows():
+        label = f"[{row['rule_id']}] {row['rule_name']} (Priority {row['priority']})"
+        options[label] = int(row["rule_id"])
+
+    with st.form("add_rule_version_form", clear_on_submit=False):
+        selected_label = st.selectbox("Select Rule", options=list(options.keys()))
+        version_number = st.text_input("Version Number", placeholder="e.g., 1.0, v2")
+        rule_snapshot = st.text_area("Rule Snapshot (JSON text)", placeholder='e.g., {"name": "My Rule", "conditions": []}')
+        is_active = st.checkbox("Is Active", value=False)
+        submitted = st.form_submit_button("Add Rule Version")
+
+        if submitted:
+            if not version_number or not version_number.strip():
+                st.warning("Please provide a version number.")
+            else:
+                rule_id = options[selected_label]
+                try:
+                    add_rule_version(rule_id, version_number.strip(), rule_snapshot.strip() if rule_snapshot else "{}", is_active)
+                    st.success("Rule version added successfully.")
+                    st.toast("Rule version added.", icon="✅")
+                except Exception as exc:
+                    st.error("Unable to add rule version. Please check the database and constraints.")
+                    with st.expander("Error details"):
+                        st.code(str(exc))
+
+
+def show_add_rule_priority_page(user_id: int) -> None:
+    st.subheader("Add Rule Priority")
+    st.caption("Assign a priority level to a rule. Each rule may have only one priority entry.")
+
+    try:
+        rules_df = fetch_rules(user_id)
+    except Exception as exc:
+        st.error("Unable to load rules from the database.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+        return
+
+    if rules_df.empty:
+        st.info("No rules found. Please add a rule first.")
+        return
+
+    options: Dict[str, int] = {}
+    for _, row in rules_df.iterrows():
+        label = f"[{row['rule_id']}] {row['rule_name']} (Priority {row['priority']})"
+        options[label] = int(row["rule_id"])
+
+    with st.form("add_rule_priority_form", clear_on_submit=False):
+        selected_label = st.selectbox("Select Rule", options=list(options.keys()))
+        priority_level = st.number_input("Priority Level", min_value=0, step=1, value=1)
+        submitted = st.form_submit_button("Add Rule Priority")
+
+        if submitted:
+            rule_id = options[selected_label]
+            if rule_priority_exists(rule_id):
+                st.error("This rule already has a priority. Only one priority per rule is allowed.")
+            else:
+                try:
+                    add_rule_priority(rule_id, int(priority_level))
+                    st.success("Rule priority added successfully.")
+                    st.toast("Rule priority added.", icon="✅")
+                    fetch_rules.clear()
+                except Exception as exc:
+                    st.error("Unable to add rule priority. Please check the database and constraints.")
                     with st.expander("Error details"):
                         st.code(str(exc))
 
@@ -784,11 +934,14 @@ def main() -> None:
     show_sidebar(st.session_state.user_id, st.session_state.username)
     user_id = st.session_state.user_id
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
         "All Rules Overview",
+        "Add Rule Status",
         "Add Rule",
-        "Add Condition",
-        "Add Action",
+        "Add Rule Condition",
+        "Add Rule Action",
+        "Add Rule Version",
+        "Add Rule Priority",
         "View Conflicts",
         "Manage / Delete Rules",
         "Schema & Data Overview"
@@ -798,21 +951,30 @@ def main() -> None:
         show_all_rules_overview_page(user_id)
 
     with tab2:
-        show_add_rule_page(user_id)
+        show_add_rule_status_page()
 
     with tab3:
-        show_add_condition_page(user_id)
+        show_add_rule_page(user_id)
 
     with tab4:
-        show_add_action_page(user_id)
+        show_add_condition_page(user_id)
 
     with tab5:
-        show_conflicts_page(user_id)
+        show_add_action_page(user_id)
 
     with tab6:
-        show_manage_delete_rules_page(user_id)
+        show_add_rule_version_page(user_id)
 
     with tab7:
+        show_add_rule_priority_page(user_id)
+
+    with tab8:
+        show_conflicts_page(user_id)
+
+    with tab9:
+        show_manage_delete_rules_page(user_id)
+
+    with tab10:
         show_schema_data_overview_page()
 
 
