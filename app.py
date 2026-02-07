@@ -5,8 +5,7 @@ from datetime import date
 from typing import Any, Dict, Optional, Tuple
 import os
 import json
-import urllib.request
-import urllib.error
+import requests
 
 import streamlit as st
 
@@ -83,12 +82,11 @@ def fetch_dataframe(query: str, params: Optional[Tuple[Any, ...]] = None) -> pd.
             conn.close()
 
 
-# Hugging Face Inference API (no SDK): key from env, model for conflict explanation
+# Hugging Face: router-based free inference; key from env only (no hardcoding)
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 HUGGINGFACE_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 HUGGINGFACE_INFERENCE_URL = f"https://router.huggingface.co/hf-inference/models/{HUGGINGFACE_MODEL}"
-
-
+HUGGINGFACE_TIMEOUT = 45
 
 def _get_conflict_field(row: Dict[str, Any], *keys: str, default: str = "") -> str:
     """Get first present key from conflict row; normalize to str and strip. Ignores NaN."""
@@ -104,19 +102,20 @@ def _get_conflict_field(row: Dict[str, Any], *keys: str, default: str = "") -> s
 
 def explain_conflict_ai(conflict: dict) -> str:
     """
-    Call Hugging Face Inference API to get a readable explanation and 2–3 resolution
+    Call Hugging Face router inference API for a readable explanation and 2–3 resolution
     suggestions. Does not modify DB, resolve conflicts, run SQL, or change priorities.
+    Returns error-style string (e.g. leading '*') on failure so caller can use fallback.
     """
-    rule_1 = _get_conflict_field(conflict, "rule_1_name", "rule_name_1", default="Rule 1")
-    rule_2 = _get_conflict_field(conflict, "rule_2_name", "rule_name_2", default="Rule 2")
+    rule_1_name = _get_conflict_field(conflict, "rule_1_name", "rule_name_1", default="Rule 1")
+    rule_2_name = _get_conflict_field(conflict, "rule_2_name", "rule_name_2", default="Rule 2")
     action_1 = _get_conflict_field(conflict, "action_1", "action_type_1", default="action 1")
     action_2 = _get_conflict_field(conflict, "action_2", "action_type_2", default="action 2")
-    target = _get_conflict_field(conflict, "target_entity", "target", default="target")
-    reason = _get_conflict_field(conflict, "conflict_reason", "reason", default="Conflict detected.")
+    target_entity = _get_conflict_field(conflict, "target_entity", "target", default="target")
+    conflict_reason = _get_conflict_field(conflict, "conflict_reason", "reason", default="Conflict detected.")
 
     prompt = (
-        f"Rule conflict: '{rule_1}' (action: {action_1}) vs '{rule_2}' (action: {action_2}) "
-        f"on target '{target}'. Database reason: {reason}. "
+        f"Rule conflict: '{rule_1_name}' (action: {action_1}) vs '{rule_2_name}' (action: {action_2}) "
+        f"on target '{target_entity}'. Database reason: {conflict_reason}. "
         "In 2-4 short sentences, explain the conflict in plain language, then give exactly 2-3 concrete resolution suggestions (e.g. adjust priority, narrow conditions). No code or SQL."
     )
 
@@ -124,38 +123,65 @@ def explain_conflict_ai(conflict: dict) -> str:
         return "*AI explanation unavailable: `HUGGINGFACE_API_KEY` is not set.*"
 
     try:
-        body = json.dumps({"inputs": prompt, "parameters": {"max_length": 256, "temperature": 0.6}}).encode("utf-8")
-        req = urllib.request.Request(
+        headers = {
+            "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "inputs": prompt,
+            "parameters": {"max_new_tokens": 250, "temperature": 0.4},
+        }
+        resp = requests.post(
             HUGGINGFACE_INFERENCE_URL,
-            data=body,
-            headers={
-                "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
+            headers=headers,
+            json=payload,
+            timeout=HUGGINGFACE_TIMEOUT,
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        if resp.status_code != 200:
+            try:
+                err = resp.json().get("error", resp.text[:200])
+            except Exception:
+                err = resp.text[:200] if resp.text else str(resp.status_code)
+            return f"*API returned {resp.status_code}: {err}*"
+        data = resp.json()
         if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "generated_text" in data[0]:
             return data[0]["generated_text"].strip()
         if isinstance(data, dict):
             if "error" in data:
-                return f"*API returned an error: {data['error']}*"
+                return f"*API error: {data['error']}*"
             if "generated_text" in data:
                 return str(data["generated_text"]).strip()
         return "*Could not parse AI response.*"
-    except urllib.error.HTTPError as e:
-        try:
-            err_body = e.read().decode("utf-8")
-            err_data = json.loads(err_body)
-            msg = err_data.get("error", err_body)[:200]
-        except Exception:
-            msg = str(e)
-        return f"*API request failed ({e.code}): {msg}*"
-    except urllib.error.URLError as e:
-        return f"*Network or timeout error: {getattr(e, 'reason', str(e))}*"
+    except requests.exceptions.Timeout:
+        return "*Request timed out. Try again or use the fallback explanation.*"
+    except requests.exceptions.RequestException as e:
+        return f"*Request failed: {str(e)[:200]}*"
     except Exception as e:
         return f"*Unexpected error: {str(e)[:200]}*"
+
+
+def explain_conflict_fallback(conflict: dict) -> str:
+    """
+    Deterministic, human-readable explanation and resolution ideas when AI is
+    unavailable or rate-limited. Does not modify data or resolve conflicts.
+    """
+    rule_1_name = _get_conflict_field(conflict, "rule_1_name", "rule_name_1", default="Rule 1")
+    rule_2_name = _get_conflict_field(conflict, "rule_2_name", "rule_name_2", default="Rule 2")
+    action_1 = _get_conflict_field(conflict, "action_1", "action_type_1", default="action 1")
+    action_2 = _get_conflict_field(conflict, "action_2", "action_type_2", default="action 2")
+    target_entity = _get_conflict_field(conflict, "target_entity", "target", default="target")
+    conflict_reason = _get_conflict_field(conflict, "conflict_reason", "reason", default="Conflict detected.")
+
+    return (
+        f"**Explanation**\n\n"
+        f"Rules **{rule_1_name}** and **{rule_2_name}** conflict on the same target (**{target_entity}**). "
+        f"One specifies **{action_1}** and the other **{action_2}**, so the system cannot apply both. "
+        f"The database reports: {conflict_reason}\n\n"
+        "**Resolution ideas**\n\n"
+        "1. **Adjust priorities** — Give one rule higher priority so it is applied first.\n"
+        "2. **Narrow conditions** — Restrict one or both rules (e.g. by attribute or value) so they do not apply to the same cases.\n"
+        "3. **Merge or remove** — If both intend the same outcome, consider merging; otherwise remove or disable one rule."
+    )
 
 
 def validate_user(username: str, password: str) -> Optional[Tuple[int, str]]:
@@ -699,23 +725,26 @@ def show_conflicts_page(user_id: int) -> None:
 
     st.subheader("AI Conflict Explanation")
     st.caption(
-        "Optional: get a plain-language explanation and resolution suggestions from AI. "
-        "The AI does not modify data, resolve conflicts, run SQL, or change priorities."
+        "Optional: get a plain-language explanation and resolution suggestions. "
+        "The AI does not modify data, resolve conflicts, run SQL, or change priorities. "
+        "If the AI request fails or is rate-limited, a deterministic fallback explanation is shown."
     )
     if not HUGGINGFACE_API_KEY:
-        st.warning("Set `HUGGINGFACE_API_KEY` in your environment to enable AI explanations.")
+        st.warning("Set `HUGGINGFACE_API_KEY` in your environment to enable AI explanations. A fallback explanation is always available.")
 
     for idx, row in df.iterrows():
         row_dict = row.to_dict()
-        rule_1 = _get_conflict_field(row_dict, "rule_1_name", "rule_name_1", default="Rule 1")
-        rule_2 = _get_conflict_field(row_dict, "rule_2_name", "rule_name_2", default="Rule 2")
-        with st.expander(f"{rule_1} vs {rule_2}"):
+        rule_1_name = _get_conflict_field(row_dict, "rule_1_name", "rule_name_1", default="Rule 1")
+        rule_2_name = _get_conflict_field(row_dict, "rule_2_name", "rule_name_2", default="Rule 2")
+        with st.expander(f"{rule_1_name} vs {rule_2_name}"):
             if st.session_state.get("ai_explain_results", {}).get(idx):
                 st.markdown(st.session_state["ai_explain_results"][idx])
             if st.button("Explain with AI", key=f"ai_explain_{idx}"):
                 st.session_state.setdefault("ai_explain_results", {})[idx] = ""
                 with st.spinner("Getting AI explanation..."):
                     result = explain_conflict_ai(row_dict)
+                    if result.strip().startswith("*") or "unavailable" in result:
+                        result = explain_conflict_fallback(row_dict)
                     st.session_state["ai_explain_results"][idx] = result
                 st.rerun()
 
