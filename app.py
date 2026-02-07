@@ -80,13 +80,53 @@ def fetch_dataframe(query: str, params: Optional[Tuple[Any, ...]] = None) -> pd.
             conn.close()
 
 
-
-def add_rule(rule_name: str, category: str, priority: int, active_from: date, active_to: date) -> None:
-    query = """
-        INSERT INTO rules (rule_name, rule_category, priority, active_from, active_to)
-        VALUES (%s, %s, %s, %s, %s)
+def validate_user(username: str, password: str) -> Optional[Tuple[int, str]]:
     """
-    params = (rule_name, category, priority, active_from, active_to)
+    Validate credentials against the users table.
+    Returns (user_id, username) on success, None on failure.
+    """
+    query = "SELECT user_id, username FROM users WHERE username = %s AND password = %s"
+    try:
+        df = fetch_dataframe(query, (username.strip(), password))
+        if df.empty or len(df) == 0:
+            return None
+        row = df.iloc[0]
+        return (int(row["user_id"]), str(row["username"]))
+    except Exception:
+        return None
+
+
+def login_page() -> None:
+    st.subheader("Login")
+    st.caption("Enter your credentials to access the Rule Conflict Database.")
+    with st.form("login_form", clear_on_submit=False):
+        username = st.text_input("Username", placeholder="Enter username")
+        password = st.text_input("Password", type="password", placeholder="Enter password")
+        submitted = st.form_submit_button("Login")
+        if submitted:
+            if not username or not username.strip():
+                st.error("Please enter a username.")
+            elif not password:
+                st.error("Please enter a password.")
+            else:
+                result = validate_user(username, password)
+                if result is not None:
+                    user_id, name = result
+                    st.session_state.user_id = user_id
+                    st.session_state.username = name
+                    st.success("Login successful.")
+                    st.toast(f"Welcome, {name}!", icon="✅")
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password.")
+
+
+def add_rule(rule_name: str, category: str, priority: int, active_from: date, active_to: date, user_id: int) -> None:
+    query = """
+        INSERT INTO rules (rule_name, rule_category, priority, active_from, active_to, user_id)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    """
+    params = (rule_name, category, priority, active_from, active_to, user_id)
     execute_non_query(query, params)
 
 
@@ -108,10 +148,10 @@ def add_action(rule_id: int, action_type: str, target_entity: str) -> None:
     execute_non_query(query, params)
 
 
-def delete_rule(rule_id: int) -> None:
-    """Delete a rule. Related conditions and actions are deleted via CASCADE."""
-    query = "DELETE FROM rules WHERE rule_id = %s"
-    params = (rule_id,)
+def delete_rule(rule_id: int, user_id: int) -> None:
+    """Delete a rule owned by the user. Related conditions and actions are deleted via CASCADE."""
+    query = "DELETE FROM rules WHERE rule_id = %s AND user_id = %s"
+    params = (rule_id, user_id)
     execute_non_query(query, params)
 
 
@@ -130,29 +170,33 @@ def delete_action(action_id: int) -> None:
 
 
 @st.cache_data(ttl=60)
-def fetch_rules() -> pd.DataFrame:
+def fetch_rules(user_id: int) -> pd.DataFrame:
     """Return available rules for selection (cached briefly for smoother UX)."""
-    query = "SELECT rule_id, rule_name, rule_category, priority FROM rules ORDER BY rule_id"
-    return fetch_dataframe(query)
+    query = "SELECT rule_id, rule_name, rule_category, priority FROM rules WHERE user_id = %s ORDER BY rule_id"
+    return fetch_dataframe(query, (user_id,))
 
 
 @st.cache_data(ttl=60)
-def fetch_conflicts() -> pd.DataFrame:
-
-    query = "SELECT * FROM rule_conflicts_view"
-    return fetch_dataframe(query)
+def fetch_conflicts(user_id: int) -> pd.DataFrame:
+    """Return conflicts scoped to the user's rules."""
+    query = """
+        SELECT * FROM rule_conflicts_view
+        WHERE rule_id_1 IN (SELECT rule_id FROM rules WHERE user_id = %s)
+           OR rule_id_2 IN (SELECT rule_id FROM rules WHERE user_id = %s)
+    """
+    return fetch_dataframe(query, (user_id, user_id))
 
 
 @st.cache_data(ttl=60)
-def fetch_all_rules() -> pd.DataFrame:
+def fetch_all_rules(user_id: int) -> pd.DataFrame:
     """Return all rules for the overview tab."""
-    query = "SELECT * FROM rules ORDER BY rule_id"
-    return fetch_dataframe(query)
+    query = "SELECT * FROM rules WHERE user_id = %s ORDER BY rule_id"
+    return fetch_dataframe(query, (user_id,))
 
 
 @st.cache_data(ttl=60)
-def fetch_all_conditions() -> pd.DataFrame:
-    """Return all rule conditions joined with rule names."""
+def fetch_all_conditions(user_id: int) -> pd.DataFrame:
+    """Return all rule conditions joined with rule names (user-scoped)."""
     query = """
         SELECT 
             rc.condition_id,
@@ -162,15 +206,15 @@ def fetch_all_conditions() -> pd.DataFrame:
             rc.operator,
             rc.value
         FROM rule_conditions rc
-        JOIN rules r ON rc.rule_id = r.rule_id
+        JOIN rules r ON rc.rule_id = r.rule_id AND r.user_id = %s
         ORDER BY rc.rule_id, rc.condition_id
     """
-    return fetch_dataframe(query)
+    return fetch_dataframe(query, (user_id,))
 
 
 @st.cache_data(ttl=60)
-def fetch_all_actions() -> pd.DataFrame:
-    """Return all rule actions joined with rule names."""
+def fetch_all_actions(user_id: int) -> pd.DataFrame:
+    """Return all rule actions joined with rule names (user-scoped)."""
     query = """
         SELECT 
             ra.action_id,
@@ -179,22 +223,22 @@ def fetch_all_actions() -> pd.DataFrame:
             ra.action_type,
             ra.target_entity
         FROM rule_actions ra
-        JOIN rules r ON ra.rule_id = r.rule_id
+        JOIN rules r ON ra.rule_id = r.rule_id AND r.user_id = %s
         ORDER BY ra.rule_id, ra.action_id
     """
-    return fetch_dataframe(query)
+    return fetch_dataframe(query, (user_id,))
 
 
 @st.cache_data(ttl=60)
-def fetch_rules_for_delete() -> pd.DataFrame:
+def fetch_rules_for_delete(user_id: int) -> pd.DataFrame:
     """Return rules with rule_id and rule_name for delete dropdown."""
-    query = "SELECT rule_id, rule_name FROM rules ORDER BY rule_id"
-    return fetch_dataframe(query)
+    query = "SELECT rule_id, rule_name FROM rules WHERE user_id = %s ORDER BY rule_id"
+    return fetch_dataframe(query, (user_id,))
 
 
 @st.cache_data(ttl=60)
-def fetch_conditions_for_delete() -> pd.DataFrame:
-    """Return all conditions with condition_id for deletion."""
+def fetch_conditions_for_delete(user_id: int) -> pd.DataFrame:
+    """Return all conditions with condition_id for deletion (user-scoped)."""
     query = """
         SELECT 
             rc.condition_id,
@@ -204,15 +248,15 @@ def fetch_conditions_for_delete() -> pd.DataFrame:
             rc.operator,
             rc.value
         FROM rule_conditions rc
-        JOIN rules r ON rc.rule_id = r.rule_id
+        JOIN rules r ON rc.rule_id = r.rule_id AND r.user_id = %s
         ORDER BY rc.condition_id
     """
-    return fetch_dataframe(query)
+    return fetch_dataframe(query, (user_id,))
 
 
 @st.cache_data(ttl=60)
-def fetch_actions_for_delete() -> pd.DataFrame:
-    """Return all actions with action_id for deletion."""
+def fetch_actions_for_delete(user_id: int) -> pd.DataFrame:
+    """Return all actions with action_id for deletion (user-scoped)."""
     query = """
         SELECT 
             ra.action_id,
@@ -221,10 +265,10 @@ def fetch_actions_for_delete() -> pd.DataFrame:
             ra.action_type,
             ra.target_entity
         FROM rule_actions ra
-        JOIN rules r ON ra.rule_id = r.rule_id
+        JOIN rules r ON ra.rule_id = r.rule_id AND r.user_id = %s
         ORDER BY ra.action_id
     """
-    return fetch_dataframe(query)
+    return fetch_dataframe(query, (user_id,))
 
 
 def check_db_health() -> Tuple[bool, Optional[str]]:
@@ -238,10 +282,11 @@ def check_db_health() -> Tuple[bool, Optional[str]]:
 
 
 
-def show_sidebar() -> None:
+def show_sidebar(user_id: int, username: str) -> None:
 
     st.sidebar.title("Rule Conflict DB")
     st.sidebar.caption("Manage rules, conditions, actions, and view conflicts.")
+    st.sidebar.markdown(f"**Logged in as:** {username}")
 
     # Database status
     healthy, error_msg = check_db_health()
@@ -253,10 +298,16 @@ def show_sidebar() -> None:
             st.code(error_msg or "Unknown error")
 
     st.sidebar.markdown("---")
+    if st.sidebar.button("Logout", type="primary"):
+        for key in ("user_id", "username"):
+            if key in st.session_state:
+                del st.session_state[key]
+        st.rerun()
+    st.sidebar.markdown("---")
     st.sidebar.caption("All rule evaluation and conflict detection is implemented in SQL.")
 
 
-def show_add_rule_page() -> None:
+def show_add_rule_page(user_id: int) -> None:
     st.subheader("Add Rule")
     st.caption("Create a new rule. Business logic and conflict detection remain in the database.")
 
@@ -281,7 +332,7 @@ def show_add_rule_page() -> None:
                 st.warning("Please provide a rule category.")
             else:
                 try:
-                    add_rule(rule_name.strip(), rule_category.strip(), int(priority), active_from, active_to)
+                    add_rule(rule_name.strip(), rule_category.strip(), int(priority), active_from, active_to, user_id)
                     st.success("Rule added successfully.")
                     st.toast("Rule added.", icon="✅")
                     # Clear rule cache so new rule appears in dropdowns and overview
@@ -294,12 +345,12 @@ def show_add_rule_page() -> None:
                         st.code(str(exc))
 
 
-def show_add_condition_page() -> None:
+def show_add_condition_page(user_id: int) -> None:
     st.subheader("Add Condition")
     st.caption("Attach a condition to an existing rule.")
 
     try:
-        rules_df = fetch_rules()
+        rules_df = fetch_rules(user_id)
     except Exception as exc:
         st.error("Unable to load rules from the database.")
         with st.expander("Error details"):
@@ -345,12 +396,12 @@ def show_add_condition_page() -> None:
                         st.code(str(exc))
 
 
-def show_add_action_page() -> None:
+def show_add_action_page(user_id: int) -> None:
     st.subheader("Add Action")
     st.caption("Attach an action to an existing rule.")
 
     try:
-        rules_df = fetch_rules()
+        rules_df = fetch_rules(user_id)
     except Exception as exc:
         st.error("Unable to load rules from the database.")
         with st.expander("Error details"):
@@ -391,7 +442,7 @@ def show_add_action_page() -> None:
                         st.code(str(exc))
 
 
-def show_conflicts_page() -> None:
+def show_conflicts_page(user_id: int) -> None:
     st.subheader("Detected Rule Conflicts")
     st.caption(
         "This view reads directly from the SQL view `rule_conflicts_view`. "
@@ -399,7 +450,7 @@ def show_conflicts_page() -> None:
     )
 
     try:
-        df = fetch_conflicts()
+        df = fetch_conflicts(user_id)
     except Exception as exc:
         st.error("Unable to fetch conflicts from `rule_conflicts_view`.")
         with st.expander("Error details"):
@@ -423,12 +474,12 @@ def show_conflicts_page() -> None:
 )
 
 
-def show_all_rules_overview_page() -> None:
+def show_all_rules_overview_page(user_id: int) -> None:
     st.subheader("Rules")
     st.caption("All rules in the database.")
     
     try:
-        rules_df = fetch_all_rules()
+        rules_df = fetch_all_rules(user_id)
         if rules_df.empty:
             st.info("No rules found in the database.")
         else:
@@ -442,7 +493,7 @@ def show_all_rules_overview_page() -> None:
     st.caption("All rule conditions joined with rule names.")
     
     try:
-        conditions_df = fetch_all_conditions()
+        conditions_df = fetch_all_conditions(user_id)
         if conditions_df.empty:
             st.info("No conditions found in the database.")
         else:
@@ -456,7 +507,7 @@ def show_all_rules_overview_page() -> None:
     st.caption("All rule actions joined with rule names.")
     
     try:
-        actions_df = fetch_all_actions()
+        actions_df = fetch_all_actions(user_id)
         if actions_df.empty:
             st.info("No actions found in the database.")
         else:
@@ -467,13 +518,13 @@ def show_all_rules_overview_page() -> None:
             st.code(str(exc))
 
 
-def show_manage_delete_rules_page() -> None:
+def show_manage_delete_rules_page(user_id: int) -> None:
     st.subheader("Delete Rule")
     st.caption("Delete a rule and all its related conditions and actions (CASCADE).")
     
     # Display all rules in a table
     try:
-        rules_df = fetch_rules_for_delete()
+        rules_df = fetch_rules_for_delete(user_id)
         if rules_df.empty:
             st.info("No rules found in the database.")
             return
@@ -497,7 +548,7 @@ def show_manage_delete_rules_page() -> None:
                 else:
                     rule_id = rule_options[selected_label]
                     try:
-                        delete_rule(rule_id)
+                        delete_rule(rule_id, user_id)
                         st.success(f"Rule {rule_id} deleted successfully. All related conditions and actions have been deleted.")
                         st.toast("Rule deleted.", icon="✅")
                         # Clear all caches to refresh UI
@@ -528,7 +579,7 @@ def show_manage_delete_rules_page() -> None:
         st.caption("Delete a specific condition without deleting the entire rule.")
         
         try:
-            conditions_df = fetch_conditions_for_delete()
+            conditions_df = fetch_conditions_for_delete(user_id)
             if conditions_df.empty:
                 st.info("No conditions found in the database.")
             else:
@@ -576,7 +627,7 @@ def show_manage_delete_rules_page() -> None:
         st.caption("Delete a specific action without deleting the entire rule.")
         
         try:
-            actions_df = fetch_actions_for_delete()
+            actions_df = fetch_actions_for_delete(user_id)
             if actions_df.empty:
                 st.info("No actions found in the database.")
             else:
@@ -620,9 +671,19 @@ def show_manage_delete_rules_page() -> None:
 
 def main() -> None:
 
-    st.title("Rule Conflict Database")
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = None
+    if "username" not in st.session_state:
+        st.session_state.username = None
 
-    show_sidebar()
+    if st.session_state.user_id is None:
+        st.title("Rule Conflict Database")
+        login_page()
+        return
+
+    st.title("Rule Conflict Database")
+    show_sidebar(st.session_state.user_id, st.session_state.username)
+    user_id = st.session_state.user_id
 
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "All Rules Overview",
@@ -634,22 +695,22 @@ def main() -> None:
     ])
 
     with tab1:
-        show_all_rules_overview_page()
+        show_all_rules_overview_page(user_id)
 
     with tab2:
-        show_add_rule_page()
+        show_add_rule_page(user_id)
 
     with tab3:
-        show_add_condition_page()
+        show_add_condition_page(user_id)
 
     with tab4:
-        show_add_action_page()
+        show_add_action_page(user_id)
 
     with tab5:
-        show_conflicts_page()
+        show_conflicts_page(user_id)
 
     with tab6:
-        show_manage_delete_rules_page()
+        show_manage_delete_rules_page(user_id)
 
 
 if __name__ == "__main__":
