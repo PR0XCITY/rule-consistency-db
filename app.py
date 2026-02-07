@@ -139,11 +139,47 @@ def get_rule_conditions_summary(rule_id: int) -> str:
         return "No conditions defined"
 
 
-def explain_conflict_ai(conflict: dict) -> str:
+def explain_conflict_deterministic(conflict: dict) -> str:
     """
-    Use Hugging Face InferenceClient for a conflict-specific explanation. Prompt uses
-    rule names, conditions, actions, and target_entity so different conflicts get different output.
-    Returns model-generated text on success, or a clear error string on failure. Does not raise.
+    Local, deterministic explanation based on rule conditions and actions. No generic templates;
+    output is specific to the given condition strings and conflict data.
+    """
+    rule_1_name = _get_conflict_field(conflict, "rule_1_name", "rule_name_1", default="Rule 1")
+    rule_2_name = _get_conflict_field(conflict, "rule_2_name", "rule_name_2", default="Rule 2")
+    rule_1_conditions = _get_conflict_field(conflict, "rule_1_conditions", default="No conditions defined")
+    rule_2_conditions = _get_conflict_field(conflict, "rule_2_conditions", default="No conditions defined")
+    action_1 = _get_conflict_field(conflict, "action_1", "action_type_1", default="action 1")
+    action_2 = _get_conflict_field(conflict, "action_2", "action_type_2", default="action 2")
+    target_entity = _get_conflict_field(conflict, "target_entity", "target", default="target")
+
+    no_c1 = not rule_1_conditions or rule_1_conditions == "No conditions defined"
+    no_c2 = not rule_2_conditions or rule_2_conditions == "No conditions defined"
+    if no_c1 and no_c2:
+        overlap = "Both rules have no conditions defined, so they apply to the same set of entities."
+    elif no_c1:
+        overlap = f"Rule 1 has no conditions (applies to all); Rule 2 applies when: {rule_2_conditions}. So any entity satisfying {rule_2_conditions} can trigger both rules."
+    elif no_c2:
+        overlap = f"Rule 2 has no conditions (applies to all); Rule 1 applies when: {rule_1_conditions}. So any entity satisfying {rule_1_conditions} can trigger both rules."
+    else:
+        overlap = f"Rule 1 applies when: {rule_1_conditions}. Rule 2 applies when: {rule_2_conditions}. If an entity satisfies both ({rule_1_conditions} AND {rule_2_conditions}), both rules fire for the same {target_entity}."
+
+    action_conflict = (
+        f"Rule \"{rule_1_name}\" specifies action **{action_1}** and rule \"{rule_2_name}\" specifies action **{action_2}**. "
+        f"For a single {target_entity} that meets both condition sets, the system cannot apply {action_1} and {action_2} at once, so this is a conflict."
+    )
+
+    strategies = (
+        "**Resolution strategies:** (1) Assign different priorities to the two rules so one is applied first for overlapping cases. "
+        "(2) Tighten one or both condition sets so they do not overlap (e.g. add or refine attributes). "
+        "(3) Merge or remove one rule if the intended outcome can be achieved by the other."
+    )
+
+    return f"**Condition overlap**\n\n{overlap}\n\n**Why the actions conflict**\n\n{action_conflict}\n\n{strategies}"
+
+
+def explain_conflict_ai(conflict: dict) -> Optional[str]:
+    """
+    Use Hugging Face InferenceClient for a conflict-specific explanation. On any failure, returns None.
     """
     rule_1_name = _get_conflict_field(conflict, "rule_1_name", "rule_name_1", default="Rule 1")
     rule_2_name = _get_conflict_field(conflict, "rule_2_name", "rule_name_2", default="Rule 2")
@@ -164,11 +200,10 @@ def explain_conflict_ai(conflict: dict) -> str:
     )
 
     if not HUGGINGFACE_API_KEY:
-        return "Error: HUGGINGFACE_API_KEY is not set. Set it in your environment to use AI explanations."
-
+        return None
     client = _get_hf_client()
     if client is None:
-        return "Error: Could not initialize Hugging Face InferenceClient. Check HUGGINGFACE_API_KEY and huggingface_hub."
+        return None
 
     try:
         result = client.text_generation(
@@ -176,17 +211,14 @@ def explain_conflict_ai(conflict: dict) -> str:
             max_new_tokens=256,
             temperature=0.4,
         )
-    except Exception as e:
-        err = str(e)
-        if hasattr(e, "response") and getattr(e.response, "status_code", None) is not None:
-            print(f"[AI conflict] HTTP status: {e.response.status_code}")  # minimal debug logging
-        return f"Error: Inference failed — {err[:400]}"
+    except Exception:
+        return None
 
     if result is None:
-        return "Error: No response from model."
+        return None
     text = (result if isinstance(result, str) else getattr(result, "generated_text", None) or str(result)).strip()
     if not text:
-        return "Error: Model returned empty text."
+        return None
     return text
 
 
@@ -743,6 +775,8 @@ def show_conflicts_page(user_id: int) -> None:
         rule_2_name = _get_conflict_field(row_dict, "rule_2_name", "rule_name_2", default="Rule 2")
         with st.expander(f"{rule_1_name} vs {rule_2_name}"):
             if st.session_state.get("ai_explain_results", {}).get(idx):
+                if st.session_state.get("ai_explain_used_deterministic", {}).get(idx):
+                    st.caption("AI service unavailable, showing system-generated explanation.")
                 st.markdown(st.session_state["ai_explain_results"][idx])
             if st.button("Explain with AI", key=f"ai_explain_{idx}"):
                 st.session_state.setdefault("ai_explain_results", {})[idx] = ""
@@ -763,8 +797,14 @@ def show_conflicts_page(user_id: int) -> None:
                         enriched["rule_1_conditions"] = "No conditions defined"
                         enriched["rule_2_conditions"] = "No conditions defined"
 
-                    result = explain_conflict_ai(enriched)
-                    st.session_state["ai_explain_results"][idx] = result
+                    ai_text = explain_conflict_ai(enriched)
+                    if ai_text:
+                        st.session_state["ai_explain_results"][idx] = "[AI GENERATED]\n\n" + ai_text
+                        st.session_state.setdefault("ai_explain_used_deterministic", {})[idx] = False
+                    else:
+                        st.session_state.setdefault("ai_explain_used_deterministic", {})[idx] = True
+                        det_text = explain_conflict_deterministic(enriched)
+                        st.session_state["ai_explain_results"][idx] = "[DETERMINISTIC EXPLANATION]\n\n" + det_text
                 st.rerun()
 
 
