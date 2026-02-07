@@ -102,20 +102,19 @@ def _get_conflict_field(row: Dict[str, Any], *keys: str, default: str = "") -> s
 
 def get_rule_conditions_summary(rule_id: int) -> str:
     """
-    Fetch conditions for a rule from rule_conditions (joined with rules) and return
-    a readable summary string, e.g. "gpa >= 8 AND year = 1".
+    Query rule_conditions for the given rule_id, order by condition_id, and return
+    a readable string, e.g. "gpa >= 8 AND year = 1". Returns "No conditions defined" if none exist.
     """
     try:
         query = """
             SELECT rc.attribute_name, rc.operator, rc.value
             FROM rule_conditions rc
-            JOIN rules r ON rc.rule_id = r.rule_id
             WHERE rc.rule_id = %s
             ORDER BY rc.condition_id
         """
         df = fetch_dataframe(query, (int(rule_id),))
         if df.empty:
-            return "(no conditions)"
+            return "No conditions defined"
         parts = []
         for _, row in df.iterrows():
             attr = str(row.get("attribute_name", "")).strip()
@@ -123,58 +122,41 @@ def get_rule_conditions_summary(rule_id: int) -> str:
             val = str(row.get("value", "")).strip()
             if attr or op or val:
                 parts.append(f"{attr} {op} {val}")
-        return " AND ".join(parts) if parts else "(no conditions)"
+        return " AND ".join(parts) if parts else "No conditions defined"
     except Exception:
-        return "(conditions unavailable)"
+        return "No conditions defined"
 
 
 def explain_conflict_ai(conflict: dict) -> str:
     """
-    Call Hugging Face router inference API for a conflict-specific, analytical explanation.
-    Does not modify DB, resolve conflicts, run SQL, or change priorities.
+    Call Hugging Face router inference API for a conflict-specific explanation using
+    rule condition data. Does not modify DB, resolve conflicts, run SQL, or change priorities.
     Returns error-style string (e.g. leading '*') on failure so caller can use fallback.
     """
     rule_1_name = _get_conflict_field(conflict, "rule_1_name", "rule_name_1", default="Rule 1")
     rule_2_name = _get_conflict_field(conflict, "rule_2_name", "rule_name_2", default="Rule 2")
-    rule_category_1 = _get_conflict_field(conflict, "rule_category_1", "category_1", default="(not specified)")
-    rule_category_2 = _get_conflict_field(conflict, "rule_category_2", "category_2", default="(not specified)")
+    rule_1_conditions = _get_conflict_field(conflict, "rule_1_conditions", default="No conditions defined")
+    rule_2_conditions = _get_conflict_field(conflict, "rule_2_conditions", default="No conditions defined")
     action_1 = _get_conflict_field(conflict, "action_1", "action_type_1", default="action 1")
     action_2 = _get_conflict_field(conflict, "action_2", "action_type_2", default="action 2")
     target_entity = _get_conflict_field(conflict, "target_entity", "target", default="target")
-    conflict_reason = _get_conflict_field(conflict, "conflict_reason", "reason", default="Conflict detected.")
-    rule_1_conditions = _get_conflict_field(conflict, "rule_1_conditions", default="(not provided)")
-    rule_2_conditions = _get_conflict_field(conflict, "rule_2_conditions", default="(not provided)")
-    active_from_1 = _get_conflict_field(conflict, "active_from_1", "active_from_rule_1", default="")
-    active_to_1 = _get_conflict_field(conflict, "active_to_1", "active_to_rule_1", default="")
-    active_from_2 = _get_conflict_field(conflict, "active_from_2", "active_from_rule_2", default="")
-    active_to_2 = _get_conflict_field(conflict, "active_to_2", "active_to_rule_2", default="")
-    range_1 = f"{active_from_1} to {active_to_1}" if active_from_1 or active_to_1 else "(not specified)"
-    range_2 = f"{active_from_2} to {active_to_2}" if active_from_2 or active_to_2 else "(not specified)"
 
     prompt = (
-        "You are analyzing a specific rule conflict. Do NOT give generic explanations. "
-        "Tailor every sentence to the rule names, conditions, and actions below. Do not repeat boilerplate.\n\n"
-        "--- Section 1: Conflict Context ---\n"
-        f"Rule 1: {rule_1_name} (category: {rule_category_1}). Active: {range_1}.\n"
-        f"  Conditions: {rule_1_conditions}\n"
-        f"Rule 2: {rule_2_name} (category: {rule_category_2}). Active: {range_2}.\n"
-        f"  Conditions: {rule_2_conditions}\n"
-        f"Target entity: {target_entity}.\n"
-        f"Database conflict reason: {conflict_reason}\n\n"
-        "--- Section 2: Condition Overlap Analysis ---\n"
-        "Analyze whether the conditions of BOTH rules can be true for the same entity at the same time. "
-        "Refer to the condition summaries above. Describe a real-world entity that could satisfy BOTH rule conditions simultaneously. "
-        "Explain why the overlap is possible in THIS case (use the actual condition attributes and values).\n\n"
-        "--- Section 3: Action Contradiction ---\n"
-        f"Rule 1 action: {action_1}. Rule 2 action: {action_2}. "
-        "Explain how these two actions oppose each other and why the actions then conflict when both rules apply to the same entity. "
-        "What real-world effect does this contradiction cause for the target entity?\n\n"
-        "--- Section 4: Why This Conflict Happens ---\n"
-        "In one clear sentence: Why can a single real-world entity satisfy both rules at once? "
-        "Be specific to these rules and their conditions, not generic.\n\n"
-        "--- Section 5: Resolution Ideas ---\n"
-        "Give exactly 2–3 resolution strategies specific to THIS conflict (refer to the rule names and the condition overlap you identified). "
-        "No code or SQL. No generic advice."
+        "You are analyzing a rule conflict in a policy system.\n\n"
+        "Rule 1:\n"
+        f"Name: {rule_1_name}\n"
+        f"Conditions: {rule_1_conditions}\n"
+        f"Action: {action_1}\n\n"
+        "Rule 2:\n"
+        f"Name: {rule_2_name}\n"
+        f"Conditions: {rule_2_conditions}\n"
+        f"Action: {action_2}\n\n"
+        f"Target Entity: {target_entity}\n\n"
+        "Tasks:\n"
+        "1. Explain whether the conditions of both rules can be true at the same time.\n"
+        "2. Describe a concrete real-world example of an entity that satisfies both conditions.\n"
+        "3. Explain why the actions then conflict.\n"
+        "4. Suggest 2 specific resolution strategies tailored to this conflict."
     )
 
     if not HUGGINGFACE_API_KEY:
@@ -801,15 +783,20 @@ def show_conflicts_page(user_id: int) -> None:
                 st.session_state.setdefault("ai_explain_results", {})[idx] = ""
                 with st.spinner("Getting AI explanation..."):
                     enriched = dict(row_dict)
-                    rid1 = row_dict.get("rule_id_1") or row_dict.get("rule_1_id")
-                    rid2 = row_dict.get("rule_id_2") or row_dict.get("rule_2_id")
+                    rid1 = row_dict.get("rule_1_id") or row_dict.get("rule_id_1")
+                    rid2 = row_dict.get("rule_2_id") or row_dict.get("rule_id_2")
                     try:
-                        if rid1 is not None and (hasattr(pd, "isna") and not pd.isna(rid1)):
+                        if rid1 is not None and (not hasattr(pd, "isna") or not pd.isna(rid1)):
                             enriched["rule_1_conditions"] = get_rule_conditions_summary(int(rid1))
-                        if rid2 is not None and (hasattr(pd, "isna") and not pd.isna(rid2)):
+                        else:
+                            enriched["rule_1_conditions"] = "No conditions defined"
+                        if rid2 is not None and (not hasattr(pd, "isna") or not pd.isna(rid2)):
                             enriched["rule_2_conditions"] = get_rule_conditions_summary(int(rid2))
+                        else:
+                            enriched["rule_2_conditions"] = "No conditions defined"
                     except (TypeError, ValueError):
-                        pass
+                        enriched["rule_1_conditions"] = "No conditions defined"
+                        enriched["rule_2_conditions"] = "No conditions defined"
                     result = explain_conflict_ai(enriched)
                     if result.strip().startswith("*") or "unavailable" in result:
                         result = explain_conflict_fallback(row_dict)
