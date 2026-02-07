@@ -4,8 +4,8 @@ import pandas as pd
 from datetime import date
 from typing import Any, Dict, Optional, Tuple
 import os
-import json
-import requests
+
+from huggingface_hub import InferenceClient
 
 import streamlit as st
 
@@ -82,10 +82,23 @@ def fetch_dataframe(query: str, params: Optional[Tuple[Any, ...]] = None) -> pd.
             conn.close()
 
 
-# Hugging Face: router API only (api-inference.huggingface.co is deprecated / HTTP 410)
+# Hugging Face: official InferenceClient (no manual HTTP / deprecated URLs)
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
-HUGGINGFACE_INFERENCE_URL = "https://router.huggingface.co/hf-inference/models/google/flan-t5-base"
-HUGGINGFACE_TIMEOUT = 45
+_HF_CLIENT: Optional[InferenceClient] = None
+
+
+def _get_hf_client() -> Optional[InferenceClient]:
+    """Lazy-init InferenceClient with model and token from env."""
+    global _HF_CLIENT
+    if _HF_CLIENT is None and HUGGINGFACE_API_KEY:
+        try:
+            _HF_CLIENT = InferenceClient(
+                model="google/flan-t5-base",
+                token=HUGGINGFACE_API_KEY,
+            )
+        except Exception:
+            _HF_CLIENT = False  # type: ignore
+    return _HF_CLIENT if _HF_CLIENT else None
 
 def _get_conflict_field(row: Dict[str, Any], *keys: str, default: str = "") -> str:
     """Get first present key from conflict row; normalize to str and strip. Ignores NaN."""
@@ -128,8 +141,9 @@ def get_rule_conditions_summary(rule_id: int) -> str:
 
 def explain_conflict_ai(conflict: dict) -> str:
     """
-    Call Hugging Face router API for a conflict-specific explanation. Uses plain text prompt only.
-    Returns model-generated text on success, or a clear error message on failure. Does not raise.
+    Use Hugging Face InferenceClient for a conflict-specific explanation. Prompt uses
+    rule names, conditions, actions, and target_entity so different conflicts get different output.
+    Returns model-generated text on success, or a clear error string on failure. Does not raise.
     """
     rule_1_name = _get_conflict_field(conflict, "rule_1_name", "rule_name_1", default="Rule 1")
     rule_2_name = _get_conflict_field(conflict, "rule_2_name", "rule_name_2", default="Rule 2")
@@ -152,55 +166,28 @@ def explain_conflict_ai(conflict: dict) -> str:
     if not HUGGINGFACE_API_KEY:
         return "Error: HUGGINGFACE_API_KEY is not set. Set it in your environment to use AI explanations."
 
-    headers = {
-        "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            "max_new_tokens": 256,
-            "temperature": 0.4,
-            "return_full_text": False,
-        },
-    }
+    client = _get_hf_client()
+    if client is None:
+        return "Error: Could not initialize Hugging Face InferenceClient. Check HUGGINGFACE_API_KEY and huggingface_hub."
 
     try:
-        resp = requests.post(
-            HUGGINGFACE_INFERENCE_URL,
-            headers=headers,
-            json=payload,
-            timeout=HUGGINGFACE_TIMEOUT,
+        result = client.text_generation(
+            prompt,
+            max_new_tokens=256,
+            temperature=0.4,
         )
-    except requests.exceptions.RequestException as e:
-        return f"Error: Request failed — {str(e)[:300]}"
-
-    if resp.status_code != 200:
-        print(f"[AI conflict] HTTP status: {resp.status_code}")  # minimal debug logging
-        try:
-            err_body = resp.json()
-            err_msg = err_body.get("error", resp.text[:400])
-        except Exception:
-            err_msg = resp.text[:400] if resp.text else str(resp.status_code)
-        return f"Error: HTTP {resp.status_code} — {err_msg}"
-
-    try:
-        data = resp.json()
     except Exception as e:
-        return f"Error: Invalid JSON from API — {str(e)[:200]}"
+        err = str(e)
+        if hasattr(e, "response") and getattr(e.response, "status_code", None) is not None:
+            print(f"[AI conflict] HTTP status: {e.response.status_code}")  # minimal debug logging
+        return f"Error: Inference failed — {err[:400]}"
 
-    if not isinstance(data, list) or len(data) == 0:
-        return "Error: Invalid response format — expected a non-empty list from Hugging Face router."
-
-    first = data[0]
-    if not isinstance(first, dict):
-        return "Error: Invalid response format — first element is not an object."
-
-    generated = first.get("generated_text")
-    if generated is None or (isinstance(generated, str) and not generated.strip()):
-        return "Error: No generated_text in response — model returned empty or missing field."
-
-    return str(generated).strip()
+    if result is None:
+        return "Error: No response from model."
+    text = (result if isinstance(result, str) else getattr(result, "generated_text", None) or str(result)).strip()
+    if not text:
+        return "Error: Model returned empty text."
+    return text
 
 
 def validate_user(username: str, password: str) -> Optional[Tuple[int, str]]:
