@@ -665,6 +665,109 @@ def show_manage_delete_rules_page(user_id: int) -> None:
                 st.code(str(exc))
 
 
+def show_schema_data_overview_page() -> None:
+    """Read-only overview of entire database schema and data."""
+    st.subheader("Users")
+    try:
+        df = fetch_dataframe("SELECT * FROM users")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    except Exception as exc:
+        st.error("Unable to fetch users.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+
+    st.subheader("Rules")
+    try:
+        df = fetch_dataframe("SELECT * FROM rules")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    except Exception as exc:
+        st.error("Unable to fetch rules.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+
+    st.subheader("Rule Conditions")
+    try:
+        df = fetch_dataframe("SELECT * FROM rule_conditions")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    except Exception as exc:
+        st.error("Unable to fetch rule_conditions.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+
+    st.subheader("Rule Actions")
+    try:
+        df = fetch_dataframe("SELECT * FROM rule_actions")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    except Exception as exc:
+        st.error("Unable to fetch rule_actions.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+
+    st.subheader("Rule Conflicts")
+    try:
+        df = fetch_dataframe("SELECT * FROM rule_conflicts_view")
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "conflict_reason": st.column_config.TextColumn(
+                    "Conflict Reason",
+                    width="large",
+                )
+            }
+        )
+    except Exception as exc:
+        st.error("Unable to fetch rule_conflicts_view.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+
+    st.subheader("Rule Status")
+    try:
+        df = fetch_dataframe("SELECT * FROM rule_status")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    except Exception as exc:
+        st.error("Unable to fetch rule_status.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+
+    st.subheader("Rule Versions")
+    try:
+        df = fetch_dataframe("SELECT * FROM rule_versions")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    except Exception as exc:
+        st.error("Unable to fetch rule_versions.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+
+    st.subheader("Rule Priority")
+    try:
+        df = fetch_dataframe("SELECT * FROM rule_priority")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    except Exception as exc:
+        st.error("Unable to fetch rule_priority.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+
+    st.subheader("Audit Log")
+    try:
+        df = fetch_dataframe("SELECT * FROM audit_log")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    except Exception as exc:
+        st.error("Unable to fetch audit_log.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+
+    st.subheader("Rule Execution Log")
+    try:
+        df = fetch_dataframe("SELECT * FROM rule_execution_log")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    except Exception as exc:
+        st.error("Unable to fetch rule_execution_log.")
+        with st.expander("Error details"):
+            st.code(str(exc))
+
+
 def main() -> None:
 
     if "user_id" not in st.session_state:
@@ -681,13 +784,14 @@ def main() -> None:
     show_sidebar(st.session_state.user_id, st.session_state.username)
     user_id = st.session_state.user_id
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "All Rules Overview",
         "Add Rule",
         "Add Condition",
         "Add Action",
         "View Conflicts",
-        "Manage / Delete Rules"
+        "Manage / Delete Rules",
+        "Schema & Data Overview"
     ])
 
     with tab1:
@@ -707,6 +811,9 @@ def main() -> None:
 
     with tab6:
         show_manage_delete_rules_page(user_id)
+
+    with tab7:
+        show_schema_data_overview_page()
 
 
 if __name__ == "__main__":
