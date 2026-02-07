@@ -5,16 +5,13 @@ from datetime import date
 from typing import Any, Dict, Optional, Tuple
 import os
 
-from huggingface_hub import InferenceClient
 from groq import Groq
 
 import streamlit as st
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 groq_client: Optional[Groq] = None
 try:
-    if GROQ_API_KEY:
-        groq_client = Groq(api_key=GROQ_API_KEY)
+    groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 except Exception:
     groq_client = None
 
@@ -90,24 +87,6 @@ def fetch_dataframe(query: str, params: Optional[Tuple[Any, ...]] = None) -> pd.
         if conn is not None:
             conn.close()
 
-
-# Hugging Face: official InferenceClient (no manual HTTP / deprecated URLs)
-HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
-_HF_CLIENT: Optional[InferenceClient] = None
-
-
-def _get_hf_client() -> Optional[InferenceClient]:
-    """Lazy-init InferenceClient with model and token from env."""
-    global _HF_CLIENT
-    if _HF_CLIENT is None and HUGGINGFACE_API_KEY:
-        try:
-            _HF_CLIENT = InferenceClient(
-                model="google/flan-t5-base",
-                token=HUGGINGFACE_API_KEY,
-            )
-        except Exception:
-            _HF_CLIENT = False  # type: ignore
-    return _HF_CLIENT if _HF_CLIENT else None
 
 def _get_conflict_field(row: Dict[str, Any], *keys: str, default: str = "") -> str:
     """Get first present key from conflict row; normalize to str and strip. Ignores NaN."""
@@ -186,9 +165,13 @@ def explain_conflict_deterministic(conflict: dict) -> str:
     return f"**Condition overlap**\n\n{overlap}\n\n**Why the actions conflict**\n\n{action_conflict}\n\n{strategies}"
 
 
-def explain_conflict_groq(conflict: dict) -> Optional[str]:
+GROQ_MODEL = "llama-3.1-8b-instant"
+
+
+def explain_conflict_groq(conflict: dict) -> Tuple[Optional[str], str]:
     """
-    Use Groq API for conflict explanation. Returns generated text on success, None on any failure.
+    Use Groq API for conflict explanation. Returns (generated_text, debug_message).
+    On success: (text, ""). On failure: (None, error_message).
     """
     rule_1_name = _get_conflict_field(conflict, "rule_1_name", "rule_name_1", default="Rule 1")
     rule_2_name = _get_conflict_field(conflict, "rule_2_name", "rule_name_2", default="Rule 2")
@@ -197,77 +180,38 @@ def explain_conflict_groq(conflict: dict) -> Optional[str]:
     action_1 = _get_conflict_field(conflict, "action_1", "action_type_1", default="action 1")
     action_2 = _get_conflict_field(conflict, "action_2", "action_type_2", default="action 2")
     target_entity = _get_conflict_field(conflict, "target_entity", "target", default="target")
+    conflict_reason = _get_conflict_field(conflict, "conflict_reason", "reason", default="Conflict detected.")
 
     prompt = (
         "Rule conflict analysis.\n\n"
         f"Rule 1: Name={rule_1_name}, Conditions={rule_1_conditions}, Action={action_1}.\n"
         f"Rule 2: Name={rule_2_name}, Conditions={rule_2_conditions}, Action={action_2}.\n"
-        f"Target entity: {target_entity}.\n\n"
-        "1) Determine if both rules can apply simultaneously. "
-        "2) Explain why this is a conflict or not. "
-        "3) Suggest two resolution strategies."
+        f"Target entity: {target_entity}.\n"
+        f"Database conflict reason: {conflict_reason}\n\n"
+        "1) Decide if both rules can apply to the same entity. "
+        "2) Explain clearly why this is a conflict. "
+        "3) Suggest at least two resolution strategies."
     )
 
     if not groq_client:
-        return None
+        return None, "Groq client not initialized. Set GROQ_API_KEY in your environment."
+
     try:
         response = groq_client.chat.completions.create(
-            model="llama3-8b-8192",
+            model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=256,
             temperature=0.4,
         )
         if not response or not response.choices:
-            return None
+            return None, f"Groq returned empty response for model {GROQ_MODEL}."
         content = response.choices[0].message.content
-        return content.strip() if content else None
-    except Exception:
-        return None
-
-
-def explain_conflict_ai(conflict: dict) -> Optional[str]:
-    """
-    Use Hugging Face InferenceClient for a conflict-specific explanation. On any failure, returns None.
-    """
-    rule_1_name = _get_conflict_field(conflict, "rule_1_name", "rule_name_1", default="Rule 1")
-    rule_2_name = _get_conflict_field(conflict, "rule_2_name", "rule_name_2", default="Rule 2")
-    rule_1_conditions = _get_conflict_field(conflict, "rule_1_conditions", default="No conditions defined")
-    rule_2_conditions = _get_conflict_field(conflict, "rule_2_conditions", default="No conditions defined")
-    action_1 = _get_conflict_field(conflict, "action_1", "action_type_1", default="action 1")
-    action_2 = _get_conflict_field(conflict, "action_2", "action_type_2", default="action 2")
-    target_entity = _get_conflict_field(conflict, "target_entity", "target", default="target")
-
-    prompt = (
-        "Rule conflict analysis.\n\n"
-        f"Rule 1: Name={rule_1_name}, Conditions={rule_1_conditions}, Action={action_1}.\n"
-        f"Rule 2: Name={rule_2_name}, Conditions={rule_2_conditions}, Action={action_2}.\n"
-        f"Target entity: {target_entity}.\n\n"
-        "1) Determine whether both rules can apply to the same real-world case. "
-        "2) Explain why this is or is not a conflict. "
-        "3) Suggest at least two resolution strategies."
-    )
-
-    if not HUGGINGFACE_API_KEY:
-        return None
-    client = _get_hf_client()
-    if client is None:
-        return None
-
-    try:
-        result = client.text_generation(
-            prompt,
-            max_new_tokens=256,
-            temperature=0.4,
-        )
-    except Exception:
-        return None
-
-    if result is None:
-        return None
-    text = (result if isinstance(result, str) else getattr(result, "generated_text", None) or str(result)).strip()
-    if not text:
-        return None
-    return text
+        text = content.strip() if content else None
+        if not text:
+            return None, f"Groq returned empty text for model {GROQ_MODEL}."
+        return text, ""
+    except Exception as e:
+        return None, str(e)[:500]
 
 
 def validate_user(username: str, password: str) -> Optional[Tuple[int, str]]:
@@ -825,8 +769,19 @@ def show_conflicts_page(user_id: int) -> None:
                 if st.session_state.get("ai_explain_used_deterministic", {}).get(idx):
                     st.caption("AI service unavailable, showing system-generated explanation.")
                 st.markdown(st.session_state["ai_explain_results"][idx])
+                if st.session_state.get("ai_explain_debug", {}).get(idx) is not None:
+                    dbg = st.session_state["ai_explain_debug"][idx]
+                    with st.expander("AI Debug", expanded=False):
+                        st.text(f"Groq was called: {dbg.get('groq_called', 'NO')}")
+                        st.text(f"Model name: {dbg.get('model', GROQ_MODEL)}")
+                        err = dbg.get("error_message", "")
+                        if err:
+                            st.text(f"Error message: {err}")
+                        else:
+                            st.text("Error message: (none)")
             if st.button("Explain with AI", key=f"ai_explain_{idx}"):
                 st.session_state.setdefault("ai_explain_results", {})[idx] = ""
+                st.session_state.setdefault("ai_explain_debug", {})[idx] = {}
                 with st.spinner("Getting AI explanation..."):
                     enriched = dict(row_dict)
                     rid1 = row_dict.get("rule_1_id") or row_dict.get("rule_id_1")
@@ -844,7 +799,12 @@ def show_conflicts_page(user_id: int) -> None:
                         enriched["rule_1_conditions"] = "No conditions defined"
                         enriched["rule_2_conditions"] = "No conditions defined"
 
-                    ai_text = explain_conflict_groq(enriched)
+                    ai_text, debug_msg = explain_conflict_groq(enriched)
+                    st.session_state["ai_explain_debug"][idx] = {
+                        "groq_called": "YES" if ai_text else "NO",
+                        "model": GROQ_MODEL,
+                        "error_message": debug_msg if not ai_text else "",
+                    }
                     if ai_text:
                         st.session_state["ai_explain_results"][idx] = "[AI Explanation]\n\n" + ai_text
                         st.session_state.setdefault("ai_explain_used_deterministic", {})[idx] = False
