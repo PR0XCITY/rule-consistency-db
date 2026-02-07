@@ -816,16 +816,7 @@ def show_manage_delete_rules_page(user_id: int) -> None:
 
 
 def show_schema_data_overview_page() -> None:
-    """Read-only overview of entire database schema and data."""
-    st.subheader("Users")
-    try:
-        df = fetch_dataframe("SELECT * FROM users")
-        st.dataframe(df, use_container_width=True, hide_index=True)
-    except Exception as exc:
-        st.error("Unable to fetch users.")
-        with st.expander("Error details"):
-            st.code(str(exc))
-
+    """Read-only overview of entire database schema and data (users table excluded)."""
     st.subheader("Rules")
     try:
         df = fetch_dataframe("SELECT * FROM rules")
