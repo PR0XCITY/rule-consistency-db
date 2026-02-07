@@ -6,8 +6,17 @@ from typing import Any, Dict, Optional, Tuple
 import os
 
 from huggingface_hub import InferenceClient
+from groq import Groq
 
 import streamlit as st
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+groq_client: Optional[Groq] = None
+try:
+    if GROQ_API_KEY:
+        groq_client = Groq(api_key=GROQ_API_KEY)
+except Exception:
+    groq_client = None
 
 st.set_page_config(
     page_title="Rule Conflict Database",
@@ -175,6 +184,45 @@ def explain_conflict_deterministic(conflict: dict) -> str:
     )
 
     return f"**Condition overlap**\n\n{overlap}\n\n**Why the actions conflict**\n\n{action_conflict}\n\n{strategies}"
+
+
+def explain_conflict_groq(conflict: dict) -> Optional[str]:
+    """
+    Use Groq API for conflict explanation. Returns generated text on success, None on any failure.
+    """
+    rule_1_name = _get_conflict_field(conflict, "rule_1_name", "rule_name_1", default="Rule 1")
+    rule_2_name = _get_conflict_field(conflict, "rule_2_name", "rule_name_2", default="Rule 2")
+    rule_1_conditions = _get_conflict_field(conflict, "rule_1_conditions", default="No conditions defined")
+    rule_2_conditions = _get_conflict_field(conflict, "rule_2_conditions", default="No conditions defined")
+    action_1 = _get_conflict_field(conflict, "action_1", "action_type_1", default="action 1")
+    action_2 = _get_conflict_field(conflict, "action_2", "action_type_2", default="action 2")
+    target_entity = _get_conflict_field(conflict, "target_entity", "target", default="target")
+
+    prompt = (
+        "Rule conflict analysis.\n\n"
+        f"Rule 1: Name={rule_1_name}, Conditions={rule_1_conditions}, Action={action_1}.\n"
+        f"Rule 2: Name={rule_2_name}, Conditions={rule_2_conditions}, Action={action_2}.\n"
+        f"Target entity: {target_entity}.\n\n"
+        "1) Determine if both rules can apply simultaneously. "
+        "2) Explain why this is a conflict or not. "
+        "3) Suggest two resolution strategies."
+    )
+
+    if not groq_client:
+        return None
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=256,
+            temperature=0.4,
+        )
+        if not response or not response.choices:
+            return None
+        content = response.choices[0].message.content
+        return content.strip() if content else None
+    except Exception:
+        return None
 
 
 def explain_conflict_ai(conflict: dict) -> Optional[str]:
@@ -764,10 +812,9 @@ def show_conflicts_page(user_id: int) -> None:
     st.subheader("AI Conflict Explanation")
     st.caption(
         "Get a plain-language explanation from the AI. Explanations are based on rule conditions and actions. "
-        "The AI does not modify data, resolve conflicts, run SQL, or change priorities."
+        "The AI does not modify data, resolve conflicts, run SQL, or change priorities. "
+        "AI explanations are optional and may be unavailable."
     )
-    if not HUGGINGFACE_API_KEY:
-        st.warning("Set `HUGGINGFACE_API_KEY` in your environment to enable AI explanations.")
 
     for idx, row in df.iterrows():
         row_dict = row.to_dict()
@@ -797,14 +844,14 @@ def show_conflicts_page(user_id: int) -> None:
                         enriched["rule_1_conditions"] = "No conditions defined"
                         enriched["rule_2_conditions"] = "No conditions defined"
 
-                    ai_text = explain_conflict_ai(enriched)
+                    ai_text = explain_conflict_groq(enriched)
                     if ai_text:
-                        st.session_state["ai_explain_results"][idx] = "[AI GENERATED]\n\n" + ai_text
+                        st.session_state["ai_explain_results"][idx] = "[AI Explanation]\n\n" + ai_text
                         st.session_state.setdefault("ai_explain_used_deterministic", {})[idx] = False
                     else:
                         st.session_state.setdefault("ai_explain_used_deterministic", {})[idx] = True
                         det_text = explain_conflict_deterministic(enriched)
-                        st.session_state["ai_explain_results"][idx] = "[DETERMINISTIC EXPLANATION]\n\n" + det_text
+                        st.session_state["ai_explain_results"][idx] = "[System Explanation]\n\n" + det_text
                 st.rerun()
 
 
