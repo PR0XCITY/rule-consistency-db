@@ -100,6 +100,34 @@ def _get_conflict_field(row: Dict[str, Any], *keys: str, default: str = "") -> s
     return default
 
 
+def get_rule_conditions_summary(rule_id: int) -> str:
+    """
+    Fetch conditions for a rule from rule_conditions (joined with rules) and return
+    a readable summary string, e.g. "gpa >= 8 AND year = 1".
+    """
+    try:
+        query = """
+            SELECT rc.attribute_name, rc.operator, rc.value
+            FROM rule_conditions rc
+            JOIN rules r ON rc.rule_id = r.rule_id
+            WHERE rc.rule_id = %s
+            ORDER BY rc.condition_id
+        """
+        df = fetch_dataframe(query, (int(rule_id),))
+        if df.empty:
+            return "(no conditions)"
+        parts = []
+        for _, row in df.iterrows():
+            attr = str(row.get("attribute_name", "")).strip()
+            op = str(row.get("operator", "")).strip()
+            val = str(row.get("value", "")).strip()
+            if attr or op or val:
+                parts.append(f"{attr} {op} {val}")
+        return " AND ".join(parts) if parts else "(no conditions)"
+    except Exception:
+        return "(conditions unavailable)"
+
+
 def explain_conflict_ai(conflict: dict) -> str:
     """
     Call Hugging Face router inference API for a conflict-specific, analytical explanation.
@@ -114,6 +142,8 @@ def explain_conflict_ai(conflict: dict) -> str:
     action_2 = _get_conflict_field(conflict, "action_2", "action_type_2", default="action 2")
     target_entity = _get_conflict_field(conflict, "target_entity", "target", default="target")
     conflict_reason = _get_conflict_field(conflict, "conflict_reason", "reason", default="Conflict detected.")
+    rule_1_conditions = _get_conflict_field(conflict, "rule_1_conditions", default="(not provided)")
+    rule_2_conditions = _get_conflict_field(conflict, "rule_2_conditions", default="(not provided)")
     active_from_1 = _get_conflict_field(conflict, "active_from_1", "active_from_rule_1", default="")
     active_to_1 = _get_conflict_field(conflict, "active_to_1", "active_to_rule_1", default="")
     active_from_2 = _get_conflict_field(conflict, "active_from_2", "active_from_rule_2", default="")
@@ -123,23 +153,27 @@ def explain_conflict_ai(conflict: dict) -> str:
 
     prompt = (
         "You are analyzing a specific rule conflict. Do NOT give generic explanations. "
-        "Tailor every sentence to the rule names, categories, and actions below. Do not repeat boilerplate.\n\n"
+        "Tailor every sentence to the rule names, conditions, and actions below. Do not repeat boilerplate.\n\n"
         "--- Section 1: Conflict Context ---\n"
         f"Rule 1: {rule_1_name} (category: {rule_category_1}). Active: {range_1}.\n"
+        f"  Conditions: {rule_1_conditions}\n"
         f"Rule 2: {rule_2_name} (category: {rule_category_2}). Active: {range_2}.\n"
+        f"  Conditions: {rule_2_conditions}\n"
         f"Target entity: {target_entity}.\n"
         f"Database conflict reason: {conflict_reason}\n\n"
-        "--- Section 2: Condition Analysis ---\n"
-        "Based on the context above: can the conditions of BOTH rules be true for the same entity at the same time? "
-        "Analyze why or how they overlap (refer to the specific rules by name).\n\n"
+        "--- Section 2: Condition Overlap Analysis ---\n"
+        "Analyze whether the conditions of BOTH rules can be true for the same entity at the same time. "
+        "Refer to the condition summaries above. Describe a real-world entity that could satisfy BOTH rule conditions simultaneously. "
+        "Explain why the overlap is possible in THIS case (use the actual condition attributes and values).\n\n"
         "--- Section 3: Action Contradiction ---\n"
         f"Rule 1 action: {action_1}. Rule 2 action: {action_2}. "
-        "Explain how these two actions oppose each other and what real-world effect this contradiction causes for the target entity.\n\n"
+        "Explain how these two actions oppose each other and why the actions then conflict when both rules apply to the same entity. "
+        "What real-world effect does this contradiction cause for the target entity?\n\n"
         "--- Section 4: Why This Conflict Happens ---\n"
-        "Answer in one clear sentence: Why can a single real-world entity satisfy both rules at once? "
-        "Be specific to these rules, not generic.\n\n"
+        "In one clear sentence: Why can a single real-world entity satisfy both rules at once? "
+        "Be specific to these rules and their conditions, not generic.\n\n"
         "--- Section 5: Resolution Ideas ---\n"
-        "Give exactly 2–3 resolution strategies that are specific to THIS conflict (refer to the rule names and the overlap you identified). "
+        "Give exactly 2–3 resolution strategies specific to THIS conflict (refer to the rule names and the condition overlap you identified). "
         "No code or SQL. No generic advice."
     )
 
@@ -766,7 +800,17 @@ def show_conflicts_page(user_id: int) -> None:
             if st.button("Explain with AI", key=f"ai_explain_{idx}"):
                 st.session_state.setdefault("ai_explain_results", {})[idx] = ""
                 with st.spinner("Getting AI explanation..."):
-                    result = explain_conflict_ai(row_dict)
+                    enriched = dict(row_dict)
+                    rid1 = row_dict.get("rule_id_1") or row_dict.get("rule_1_id")
+                    rid2 = row_dict.get("rule_id_2") or row_dict.get("rule_2_id")
+                    try:
+                        if rid1 is not None and (hasattr(pd, "isna") and not pd.isna(rid1)):
+                            enriched["rule_1_conditions"] = get_rule_conditions_summary(int(rid1))
+                        if rid2 is not None and (hasattr(pd, "isna") and not pd.isna(rid2)):
+                            enriched["rule_2_conditions"] = get_rule_conditions_summary(int(rid2))
+                    except (TypeError, ValueError):
+                        pass
+                    result = explain_conflict_ai(enriched)
                     if result.strip().startswith("*") or "unavailable" in result:
                         result = explain_conflict_fallback(row_dict)
                     st.session_state["ai_explain_results"][idx] = result
