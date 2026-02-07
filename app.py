@@ -4,6 +4,9 @@ import pandas as pd
 from datetime import date
 from typing import Any, Dict, Optional, Tuple
 import os
+import json
+import urllib.request
+import urllib.error
 
 import streamlit as st
 
@@ -78,6 +81,80 @@ def fetch_dataframe(query: str, params: Optional[Tuple[Any, ...]] = None) -> pd.
     finally:
         if conn is not None:
             conn.close()
+
+
+# Hugging Face Inference API (no SDK): key from env, model for conflict explanation
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
+HUGGINGFACE_MODEL = "google/flan-t5-large"
+HUGGINGFACE_INFERENCE_URL = f"https://api-inference.huggingface.co/models/{HUGGINGFACE_MODEL}"
+
+
+def _get_conflict_field(row: Dict[str, Any], *keys: str, default: str = "") -> str:
+    """Get first present key from conflict row; normalize to str and strip. Ignores NaN."""
+    for k in keys:
+        v = row.get(k)
+        if v is None or (hasattr(pd, "isna") and pd.isna(v)):
+            continue
+        s = str(v).strip()
+        if s and s.lower() != "nan":
+            return s
+    return default
+
+
+def explain_conflict_ai(conflict: dict) -> str:
+    """
+    Call Hugging Face Inference API to get a readable explanation and 2–3 resolution
+    suggestions. Does not modify DB, resolve conflicts, run SQL, or change priorities.
+    """
+    rule_1 = _get_conflict_field(conflict, "rule_1_name", "rule_name_1", default="Rule 1")
+    rule_2 = _get_conflict_field(conflict, "rule_2_name", "rule_name_2", default="Rule 2")
+    action_1 = _get_conflict_field(conflict, "action_1", "action_type_1", default="action 1")
+    action_2 = _get_conflict_field(conflict, "action_2", "action_type_2", default="action 2")
+    target = _get_conflict_field(conflict, "target_entity", "target", default="target")
+    reason = _get_conflict_field(conflict, "conflict_reason", "reason", default="Conflict detected.")
+
+    prompt = (
+        f"Rule conflict: '{rule_1}' (action: {action_1}) vs '{rule_2}' (action: {action_2}) "
+        f"on target '{target}'. Database reason: {reason}. "
+        "In 2-4 short sentences, explain the conflict in plain language, then give exactly 2-3 concrete resolution suggestions (e.g. adjust priority, narrow conditions). No code or SQL."
+    )
+
+    if not HUGGINGFACE_API_KEY:
+        return "*AI explanation unavailable: `HUGGINGFACE_API_KEY` is not set.*"
+
+    try:
+        body = json.dumps({"inputs": prompt, "parameters": {"max_length": 256, "temperature": 0.6}}).encode("utf-8")
+        req = urllib.request.Request(
+            HUGGINGFACE_INFERENCE_URL,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "generated_text" in data[0]:
+            return data[0]["generated_text"].strip()
+        if isinstance(data, dict):
+            if "error" in data:
+                return f"*API returned an error: {data['error']}*"
+            if "generated_text" in data:
+                return str(data["generated_text"]).strip()
+        return "*Could not parse AI response.*"
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8")
+            err_data = json.loads(err_body)
+            msg = err_data.get("error", err_body)[:200]
+        except Exception:
+            msg = str(e)
+        return f"*API request failed ({e.code}): {msg}*"
+    except urllib.error.URLError as e:
+        return f"*Network or timeout error: {getattr(e, 'reason', str(e))}*"
+    except Exception as e:
+        return f"*Unexpected error: {str(e)[:200]}*"
 
 
 def validate_user(username: str, password: str) -> Optional[Tuple[int, str]]:
@@ -618,6 +695,28 @@ def show_conflicts_page(user_id: int) -> None:
         )
     }
 )
+
+    st.subheader("AI Conflict Explanation")
+    st.caption(
+        "Optional: get a plain-language explanation and resolution suggestions from AI. "
+        "The AI does not modify data, resolve conflicts, run SQL, or change priorities."
+    )
+    if not HUGGINGFACE_API_KEY:
+        st.warning("Set `HUGGINGFACE_API_KEY` in your environment to enable AI explanations.")
+
+    for idx, row in df.iterrows():
+        row_dict = row.to_dict()
+        rule_1 = _get_conflict_field(row_dict, "rule_1_name", "rule_name_1", default="Rule 1")
+        rule_2 = _get_conflict_field(row_dict, "rule_2_name", "rule_name_2", default="Rule 2")
+        with st.expander(f"{rule_1} vs {rule_2}"):
+            if st.session_state.get("ai_explain_results", {}).get(idx):
+                st.markdown(st.session_state["ai_explain_results"][idx])
+            if st.button("Explain with AI", key=f"ai_explain_{idx}"):
+                st.session_state.setdefault("ai_explain_results", {})[idx] = ""
+                with st.spinner("Getting AI explanation..."):
+                    result = explain_conflict_ai(row_dict)
+                    st.session_state["ai_explain_results"][idx] = result
+                st.rerun()
 
 
 def show_all_rules_overview_page(user_id: int) -> None:
