@@ -84,8 +84,8 @@ def fetch_dataframe(query: str, params: Optional[Tuple[Any, ...]] = None) -> pd.
 
 # Hugging Face: router-based free inference; key from env only (no hardcoding)
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
-HUGGINGFACE_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
-HUGGINGFACE_INFERENCE_URL = f"https://router.huggingface.co/hf-inference/models/{HUGGINGFACE_MODEL}"
+HUGGINGFACE_MODEL = "google/flan-t5-base"
+HUGGINGFACE_INFERENCE_URL = f"https://api-inference.huggingface.co/models/{HUGGINGFACE_MODEL}"
 HUGGINGFACE_TIMEOUT = 45
 
 def _get_conflict_field(row: Dict[str, Any], *keys: str, default: str = "") -> str:
