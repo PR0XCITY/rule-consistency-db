@@ -352,8 +352,17 @@ def fetch_rules(user_id: int) -> pd.DataFrame:
 @st.cache_data(ttl=60)
 def fetch_conflicts(user_id: int) -> pd.DataFrame:
     """Return conflicts scoped to the user's rules."""
-    query = "SELECT * FROM rule_conflicts_view"
-    return fetch_dataframe(query)
+    query = """
+    SELECT *
+    FROM rule_conflicts_view
+    WHERE rule_1_id IN (
+        SELECT rule_id FROM rules WHERE user_id = %s
+    )
+    AND rule_2_id IN (
+        SELECT rule_id FROM rules WHERE user_id = %s
+    )
+    """
+    return fetch_dataframe(query, (user_id, user_id))
 
 
 @st.cache_data(ttl=60)
